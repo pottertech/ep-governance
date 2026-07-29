@@ -45,6 +45,7 @@ from ep_governance.errors import IllegalTransitionError, StaleHeadError
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 def _get_db_url() -> str:
     return os.environ.get("EP_TEST_DB_URL", "sqlite:///:memory:")
 
@@ -69,8 +70,11 @@ def conn(engine):
 def ep_service_id(conn):
     repo = PrincipalRepository(conn)
     p = repo.insert_principal(
-        principal_id=str(XID.new()), name="EP Service", type="service",
-        machine=None, description="Trusted EP service",
+        principal_id=str(XID.new()),
+        name="EP Service",
+        type="service",
+        machine=None,
+        description="Trusted EP service",
     )
     conn.commit()
     return p["id"]
@@ -80,8 +84,11 @@ def ep_service_id(conn):
 def agent_id(conn):
     repo = PrincipalRepository(conn)
     p = repo.insert_principal(
-        principal_id=str(XID.new()), name="Test Agent", type="agent",
-        machine="localhost", description="Test agent",
+        principal_id=str(XID.new()),
+        name="Test Agent",
+        type="agent",
+        machine="localhost",
+        description="Test agent",
     )
     conn.commit()
     return p["id"]
@@ -91,8 +98,11 @@ def agent_id(conn):
 def human_id(conn):
     repo = PrincipalRepository(conn)
     p = repo.insert_principal(
-        principal_id=str(XID.new()), name="Skip Potter", type="human",
-        machine=None, description="Human approver",
+        principal_id=str(XID.new()),
+        name="Skip Potter",
+        type="human",
+        machine=None,
+        description="Human approver",
     )
     conn.commit()
     return p["id"]
@@ -112,32 +122,36 @@ def setup(conn, ep_service_id, agent_id):
 
     # Create a default policy for FK satisfaction in approval requests
     policy_repo = PolicyRepository(conn)
-    policy_repo.insert_policy({
-        "id": "default",
-        "effect": "require_approval",
-        "actions": ["*"],
-        "resources": ["*"],
-        "conditions": {},
-        "priority": 0,
-        "scope": "global",
-        "agent_scope": None,
-        "description": "Default require_approval policy",
-        "status": "active",
-        "created_by": ep_service_id,
-        "approved_by": ep_service_id,
-        "approved_at": "2026-07-28T12:00:00.000000Z",
-        "activation_version": 1,
-        "exception_to": [],
-        "valid_from": None,
-        "valid_until": None,
-        "justification": None,
-    })
+    policy_repo.insert_policy(
+        {
+            "id": "default",
+            "effect": "require_approval",
+            "actions": ["*"],
+            "resources": ["*"],
+            "conditions": {},
+            "priority": 0,
+            "scope": "global",
+            "agent_scope": None,
+            "description": "Default require_approval policy",
+            "status": "active",
+            "created_by": ep_service_id,
+            "approved_by": ep_service_id,
+            "approved_at": "2026-07-28T12:00:00.000000Z",
+            "activation_version": 1,
+            "exception_to": [],
+            "valid_from": None,
+            "valid_until": None,
+            "justification": None,
+        }
+    )
 
     # Initialize audit head
     conn.execute(
-        sa.text("INSERT INTO ep_audit_heads (lattice_id, last_sequence, last_hash) "
-                "VALUES (:lid, 0, :hash)"),
-        {"lid": lattice["id"], "hash": "0" * 64}
+        sa.text(
+            "INSERT INTO ep_audit_heads (lattice_id, last_sequence, last_hash) "
+            "VALUES (:lid, 0, :hash)"
+        ),
+        {"lid": lattice["id"], "hash": "0" * 64},
     )
     conn.commit()
 
@@ -154,10 +168,12 @@ def setup(conn, ep_service_id, agent_id):
 # State machine tests
 # ---------------------------------------------------------------------------
 
+
 class TestStateMachine:
     def test_legal_transitions_match_contract(self):
         """The transitions module must match the Phase 1 contract."""
         from tests.contracts.test_transition_lifecycle import LEGAL_TRANSITIONS as CONTRACT
+
         assert LEGAL_TRANSITIONS == CONTRACT
 
     def test_is_legal_transition_returns_true_for_legal(self):
@@ -180,6 +196,7 @@ class TestStateMachine:
 # ---------------------------------------------------------------------------
 # Proposal lifecycle
 # ---------------------------------------------------------------------------
+
 
 class TestProposalLifecycle:
     def test_propose_creates_transition(self, conn, ep_service_id, setup):
@@ -221,6 +238,7 @@ class TestProposalLifecycle:
 # Self-approval rejection
 # ---------------------------------------------------------------------------
 
+
 class TestSelfApprovalRejection:
     def test_agent_cannot_approve_own_action(self, conn, ep_service_id, agent_id, human_id, setup):
         """EP-POLICY-012: the requester must not approve their own action."""
@@ -239,15 +257,21 @@ class TestSelfApprovalRejection:
         # If it went to pending_approval, try to approve as the same agent
         if transition["stage"] == "pending_approval":
             with pytest.raises(Exception):
-                engine.approve(transition["id"], approver_id=agent_id,
-                               approver_type="agent", reason="self approval")
+                engine.approve(
+                    transition["id"],
+                    approver_id=agent_id,
+                    approver_type="agent",
+                    reason="self approval",
+                )
             conn.rollback()
         else:
             # If it didn't go to pending_approval, the test is still valid
             # — we just couldn't test self-approval on this particular action
             pass
 
-    def test_human_can_approve_other_agent_action(self, conn, ep_service_id, agent_id, human_id, setup):
+    def test_human_can_approve_other_agent_action(
+        self, conn, ep_service_id, agent_id, human_id, setup
+    ):
         engine = TransitionEngine(conn, ep_service_id)
         transition = engine.propose(
             agent_id=agent_id,
@@ -259,8 +283,9 @@ class TestSelfApprovalRejection:
         conn.commit()
 
         if transition["stage"] == "pending_approval":
-            result = engine.approve(transition["id"], approver_id=human_id,
-                                     approver_type="human", reason="approved")
+            result = engine.approve(
+                transition["id"], approver_id=human_id, approver_type="human", reason="approved"
+            )
             conn.commit()
             assert result["stage"] == "authorized"
 
@@ -268,6 +293,7 @@ class TestSelfApprovalRejection:
 # ---------------------------------------------------------------------------
 # Authorization token tests
 # ---------------------------------------------------------------------------
+
 
 class TestAuthorizationTokens:
     def test_keymanager_generates_keypair(self):
@@ -410,6 +436,7 @@ class TestAuthorizationTokens:
 # Branch commit tests
 # ---------------------------------------------------------------------------
 
+
 class TestBranchCommit:
     def test_stale_head_detected(self, conn, ep_service_id, agent_id, setup):
         """Two agents use the same branch head — one commits, other gets stale_head."""
@@ -436,15 +463,17 @@ class TestBranchCommit:
 
         # Create a transition that succeeded
         trans_repo = TransitionRepository(conn)
-        trans1 = trans_repo.insert_transition({
-            "id": str(XID.new()),
-            "agent_id": agent_id,
-            "branch_id": branch_id,
-            "tool": "postgres.execute",
-            "payload_hash": "sha256:" + "a" * 64,
-            "idempotency_key": str(XID.new()),
-            "stage": "succeeded",
-        })
+        trans1 = trans_repo.insert_transition(
+            {
+                "id": str(XID.new()),
+                "agent_id": agent_id,
+                "branch_id": branch_id,
+                "tool": "postgres.execute",
+                "payload_hash": "sha256:" + "a" * 64,
+                "idempotency_key": str(XID.new()),
+                "stage": "succeeded",
+            }
+        )
         conn.commit()
 
         # First commit succeeds
@@ -464,15 +493,17 @@ class TestBranchCommit:
         assert result1["version"] == version + 1
 
         # Second commit with stale head should fail
-        trans2 = trans_repo.insert_transition({
-            "id": str(XID.new()),
-            "agent_id": agent_id,
-            "branch_id": branch_id,
-            "tool": "postgres.execute",
-            "payload_hash": "sha256:" + "b" * 64,
-            "idempotency_key": str(XID.new()),
-            "stage": "succeeded",
-        })
+        trans2 = trans_repo.insert_transition(
+            {
+                "id": str(XID.new()),
+                "agent_id": agent_id,
+                "branch_id": branch_id,
+                "tool": "postgres.execute",
+                "payload_hash": "sha256:" + "b" * 64,
+                "idempotency_key": str(XID.new()),
+                "stage": "succeeded",
+            }
+        )
         conn.commit()
 
         committer2 = BranchCommitter(conn, ep_service_id)
@@ -485,7 +516,7 @@ class TestBranchCommit:
                 bt_planning_budget=80.0,
                 metadata={},
                 expected_head_id=head_id,  # stale!
-                expected_version=version,   # stale!
+                expected_version=version,  # stale!
                 lattice_id=lattice_id,
             )
         conn.rollback()
@@ -494,6 +525,7 @@ class TestBranchCommit:
 # ---------------------------------------------------------------------------
 # Execution result tests
 # ---------------------------------------------------------------------------
+
 
 class TestExecutionResults:
     def test_record_success_advances_to_succeeded(self, conn, ep_service_id, agent_id, setup):

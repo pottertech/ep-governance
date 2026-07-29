@@ -3,18 +3,18 @@
 Implements the 9-step branch commit transaction from the concurrency model
 (docs/concurrency-model.md, EP-CONCURRENCY-006):
 
-1. verify transition stage
+1. verify transition stage (must be 'executing' or 'succeeded')
 2. verify branch head and version
 3. insert the realized node
 4. insert the dependency edge
 5. mark prior head superseded when appropriate
 6. update branch head
 7. increment branch version
-8. record transition result
+8. record transition result AND advance stage to 'succeeded' atomically
 9. append audit event through trusted audit writer
 
 All steps run in a single transaction. If any step fails, the entire
-transaction rolls back.
+transaction rolls back and the transition remains at 'executing'.
 """
 
 from __future__ import annotations
@@ -82,17 +82,25 @@ class BranchCommitter:
             A dict with the new node_id, branch_id, and new version.
 
         Raises:
-            IllegalTransitionError: If the transition is not in 'succeeded' stage.
+            IllegalTransitionError: If the transition is not in 'executing' or
+                'succeeded' stage.  'executing' is the normal pre-commit stage;
+                'succeeded' is accepted for backward compatibility with callers
+                that already advanced the stage.
             StaleHeadError: If the branch head has advanced since the proposal.
         """
-        # Step 1: Verify transition stage is 'succeeded'
+        # Step 1: Verify transition stage is 'executing' (normal path) or
+        # 'succeeded' (legacy path where the caller already advanced the stage).
+        # We accept 'executing' so that the stage advancement to 'succeeded'
+        # happens atomically inside this transaction — if any later step fails,
+        # the transaction rolls back and the transition stays at 'executing'.
         transition = self.transition_repo.get_transition(transition_id)
         if transition is None:
             raise IllegalTransitionError(f"Transition {transition_id} not found")
         stage = transition.get("stage", "")
-        if stage != "succeeded":
+        if stage not in ("executing", "succeeded"):
             raise IllegalTransitionError(
-                f"Transition {transition_id} is in stage '{stage}', must be 'succeeded' to commit"
+                f"Transition {transition_id} is in stage '{stage}', "
+                "must be 'executing' or 'succeeded' to commit"
             )
 
         # Step 2: Verify branch head and version (optimistic concurrency)
@@ -151,13 +159,29 @@ class BranchCommitter:
         # Step 7: Branch version is incremented as part of step 6
         # (update_head does UPDATE ... WHERE version = :expected, sets new head)
 
-        # Step 8: Record transition result (link to_node_id)
+        # Step 8: Record transition result (link to_node_id) AND advance the
+        # stage to 'succeeded' atomically as part of this same transaction.
+        # If the transition is still in 'executing' (the normal path), we
+        # advance it to 'succeeded' with an optimistic stage guard so that
+        # a concurrent record_result(failure) cannot race with us.  If it is
+        # already 'succeeded' (legacy caller), we skip the stage update.
         self.transition_repo.update_result(
             transition_id,
             exit_status="success",
             result_summary=description,
             to_node_id=new_node_id,
         )
+        if stage == "executing":
+            updated_stage = self.transition_repo.update_stage(
+                transition_id,
+                "succeeded",
+                expected_current_stage="executing",
+            )
+            if not updated_stage:
+                raise IllegalTransitionError(
+                    f"Transition {transition_id} stage advanced concurrently; "
+                    "could not advance to 'succeeded'"
+                )
 
         # Step 9: Append audit event through trusted audit writer
         self.audit_writer.write_event(

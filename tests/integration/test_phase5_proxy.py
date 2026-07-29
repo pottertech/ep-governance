@@ -68,8 +68,11 @@ def conn(engine):
 def ep_service_id(conn):
     repo = PrincipalRepository(conn)
     p = repo.insert_principal(
-        principal_id=str(XID.new()), name="EP Service", type="service",
-        machine=None, description="Trusted EP service",
+        principal_id=str(XID.new()),
+        name="EP Service",
+        type="service",
+        machine=None,
+        description="Trusted EP service",
     )
     conn.commit()
     return p["id"]
@@ -79,8 +82,11 @@ def ep_service_id(conn):
 def agent_id(conn):
     repo = PrincipalRepository(conn)
     p = repo.insert_principal(
-        principal_id=str(XID.new()), name="Test Agent", type="agent",
-        machine="localhost", description="Test agent",
+        principal_id=str(XID.new()),
+        name="Test Agent",
+        type="agent",
+        machine="localhost",
+        description="Test agent",
     )
     conn.commit()
     return p["id"]
@@ -98,27 +104,44 @@ def setup(conn, ep_service_id, agent_id):
     branch = branch_repo.create_branch(lattice["id"], "main")
 
     policy_repo = PolicyRepository(conn)
-    policy_repo.insert_policy({
-        "id": "default", "effect": "allow", "actions": ["*"],
-        "resources": ["*"], "conditions": {}, "priority": 0,
-        "scope": "global", "agent_scope": None,
-        "description": "Default allow", "status": "active",
-        "created_by": ep_service_id, "approved_by": ep_service_id,
-        "approved_at": "2026-07-28T12:00:00.000000Z", "activation_version": 1,
-        "exception_to": [], "valid_from": None, "valid_until": None,
-        "justification": None,
-    })
+    policy_repo.insert_policy(
+        {
+            "id": "default",
+            "effect": "allow",
+            "actions": ["*"],
+            "resources": ["*"],
+            "conditions": {},
+            "priority": 0,
+            "scope": "global",
+            "agent_scope": None,
+            "description": "Default allow",
+            "status": "active",
+            "created_by": ep_service_id,
+            "approved_by": ep_service_id,
+            "approved_at": "2026-07-28T12:00:00.000000Z",
+            "activation_version": 1,
+            "exception_to": [],
+            "valid_from": None,
+            "valid_until": None,
+            "justification": None,
+        }
+    )
 
     conn.execute(
-        sa.text("INSERT INTO ep_audit_heads (lattice_id, last_sequence, last_hash) "
-                "VALUES (:lid, 0, :hash)"),
-        {"lid": lattice["id"], "hash": "0" * 64}
+        sa.text(
+            "INSERT INTO ep_audit_heads (lattice_id, last_sequence, last_hash) "
+            "VALUES (:lid, 0, :hash)"
+        ),
+        {"lid": lattice["id"], "hash": "0" * 64},
     )
     conn.commit()
 
     return {
-        "project": project, "lattice": lattice, "branch": branch,
-        "agent_id": agent_id, "ep_service_id": ep_service_id,
+        "project": project,
+        "lattice": lattice,
+        "branch": branch,
+        "agent_id": agent_id,
+        "ep_service_id": ep_service_id,
     }
 
 
@@ -133,23 +156,35 @@ def auth_engine(conn, key_manager, ep_service_id):
 
 
 @pytest.fixture
-def proxy(conn, auth_engine, ep_service_id):
+def proxy(conn, auth_engine, ep_service_id, setup):
     """Create a PostgresProxy pointed at the EP governance DB itself for testing."""
+    from ep_governance.transitions import TransitionEngine
+    from ep_governance.branches import BranchCommitter
+
+    trans_engine = TransitionEngine(conn, ep_service_id)
+    committer = BranchCommitter(conn, ep_service_id)
     config = ProxyConfig(
         target_connection_string=_get_db_url(),
         proxy_audience="postgres-proxy",
         ep_service_principal_id=ep_service_id,
     )
-    return PostgresProxy(conn, auth_engine, config)
+    return PostgresProxy(conn, auth_engine, config, trans_engine, committer, None)
 
 
 # ---------------------------------------------------------------------------
 # Helper: full propose -> authorize -> issue token flow
 # ---------------------------------------------------------------------------
 
+
 def _propose_and_authorize(
-    conn, ep_service_id, agent_id, setup, auth_engine, key_manager,
-    tool="postgres.execute", arguments=None,
+    conn,
+    ep_service_id,
+    agent_id,
+    setup,
+    auth_engine,
+    key_manager,
+    tool="postgres.execute",
+    arguments=None,
 ):
     """Propose, get authorized, issue a token. Returns (transition, token)."""
     if arguments is None:
@@ -193,8 +228,12 @@ class TestProxyTokenVerification:
     def test_valid_token_accepted(self, conn, setup, key_manager, auth_engine, proxy):
         """A valid signed token should be accepted by the proxy."""
         transition, token = _propose_and_authorize(
-            conn, setup["ep_service_id"], setup["agent_id"], setup,
-            auth_engine, key_manager,
+            conn,
+            setup["ep_service_id"],
+            setup["agent_id"],
+            setup,
+            auth_engine,
+            key_manager,
         )
         if token is None:
             pytest.skip("Transition did not reach authorized stage")
@@ -210,8 +249,12 @@ class TestProxyTokenVerification:
     def test_altered_payload_rejected(self, conn, setup, key_manager, auth_engine, proxy):
         """If the payload hash is altered, execution must be rejected."""
         transition, token = _propose_and_authorize(
-            conn, setup["ep_service_id"], setup["agent_id"], setup,
-            auth_engine, key_manager,
+            conn,
+            setup["ep_service_id"],
+            setup["agent_id"],
+            setup,
+            auth_engine,
+            key_manager,
         )
         if token is None:
             pytest.skip("Transition did not reach authorized stage")
@@ -228,8 +271,12 @@ class TestProxyTokenVerification:
     def test_token_reuse_rejected(self, conn, setup, key_manager, auth_engine, proxy):
         """A token that has already been claimed must be rejected on second use."""
         transition, token = _propose_and_authorize(
-            conn, setup["ep_service_id"], setup["agent_id"], setup,
-            auth_engine, key_manager,
+            conn,
+            setup["ep_service_id"],
+            setup["agent_id"],
+            setup,
+            auth_engine,
+            key_manager,
         )
         if token is None:
             pytest.skip("Transition did not reach authorized stage")
@@ -247,13 +294,20 @@ class TestProxyTokenVerification:
         result2 = proxy.execute(signed, payload, key_manager.public_key)
         conn.commit()
         assert result2.success is False
-        assert "already used" in result2.result_summary.lower() or "claim failed" in result2.result_summary.lower()
+        assert (
+            "already used" in result2.result_summary.lower()
+            or "claim failed" in result2.result_summary.lower()
+        )
 
     def test_wrong_audience_rejected(self, conn, setup, key_manager, auth_engine, ep_service_id):
         """A token with the wrong proxy audience must be rejected."""
         transition, token = _propose_and_authorize(
-            conn, setup["ep_service_id"], setup["agent_id"], setup,
-            auth_engine, key_manager,
+            conn,
+            setup["ep_service_id"],
+            setup["agent_id"],
+            setup,
+            auth_engine,
+            key_manager,
         )
         if token is None:
             pytest.skip("Transition did not reach authorized stage")
@@ -279,8 +333,12 @@ class TestProxySQLClassification:
     def test_select_executed(self, conn, setup, key_manager, auth_engine, proxy):
         """SELECT should be executed successfully."""
         transition, token = _propose_and_authorize(
-            conn, setup["ep_service_id"], setup["agent_id"], setup,
-            auth_engine, key_manager,
+            conn,
+            setup["ep_service_id"],
+            setup["agent_id"],
+            setup,
+            auth_engine,
+            key_manager,
             arguments={"sql": "SELECT 1 as result", "host": "localhost"},
         )
         if token is None:
@@ -297,8 +355,12 @@ class TestProxySQLClassification:
     def test_forbidden_operation_rejected(self, conn, setup, key_manager, auth_engine, proxy):
         """TRUNCATE should be rejected as forbidden by the proxy."""
         transition, token = _propose_and_authorize(
-            conn, setup["ep_service_id"], setup["agent_id"], setup,
-            auth_engine, key_manager,
+            conn,
+            setup["ep_service_id"],
+            setup["agent_id"],
+            setup,
+            auth_engine,
+            key_manager,
             arguments={"sql": "TRUNCATE TABLE ep_projects", "host": "localhost"},
         )
         if token is None:
@@ -319,8 +381,12 @@ class TestProxySQLClassification:
         sent to the proxy for execution omits the SQL field.
         """
         transition, token = _propose_and_authorize(
-            conn, setup["ep_service_id"], setup["agent_id"], setup,
-            auth_engine, key_manager,
+            conn,
+            setup["ep_service_id"],
+            setup["agent_id"],
+            setup,
+            auth_engine,
+            key_manager,
             arguments={"sql": "SELECT 1", "host": "localhost"},
         )
         if token is None:
@@ -333,15 +399,23 @@ class TestProxySQLClassification:
 
         result = proxy.execute(signed, payload, key_manager.public_key)
         assert result.success is False
-        assert "no sql" in result.result_summary.lower() or "mismatch" in result.result_summary.lower()
+        assert (
+            "no sql" in result.result_summary.lower() or "mismatch" in result.result_summary.lower()
+        )
 
 
 class TestProxyResultFlow:
-    def test_successful_execution_returns_result(self, conn, setup, key_manager, auth_engine, proxy):
+    def test_successful_execution_returns_result(
+        self, conn, setup, key_manager, auth_engine, proxy
+    ):
         """A successful execution should return a result with rows_affected."""
         transition, token = _propose_and_authorize(
-            conn, setup["ep_service_id"], setup["agent_id"], setup,
-            auth_engine, key_manager,
+            conn,
+            setup["ep_service_id"],
+            setup["agent_id"],
+            setup,
+            auth_engine,
+            key_manager,
             arguments={"sql": "SELECT 1 as val", "host": "localhost"},
         )
         if token is None:
@@ -357,11 +431,17 @@ class TestProxyResultFlow:
         assert result.rows_affected >= 1
         assert result.execution_attempt_id != ""
 
-    def test_execution_advances_transition_to_executing(self, conn, setup, key_manager, auth_engine, proxy):
+    def test_execution_advances_transition_to_executing(
+        self, conn, setup, key_manager, auth_engine, proxy
+    ):
         """After proxy claims the token, the transition should be in 'executing' stage."""
         transition, token = _propose_and_authorize(
-            conn, setup["ep_service_id"], setup["agent_id"], setup,
-            auth_engine, key_manager,
+            conn,
+            setup["ep_service_id"],
+            setup["agent_id"],
+            setup,
+            auth_engine,
+            key_manager,
         )
         if token is None:
             pytest.skip("Transition did not reach authorized stage")
@@ -400,7 +480,8 @@ class TestProxyRedaction:
             def _execute_adapter(self, payload, token, attempt_id):
                 output = "password=secret123 token=abc456 key=xyz789"
                 return ExecutionResult(
-                    success=True, exit_status="success",
+                    success=True,
+                    exit_status="success",
                     result_summary=self._redact(output),
                 )
 

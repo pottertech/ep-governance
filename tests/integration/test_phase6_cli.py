@@ -47,9 +47,17 @@ class TestCLIRegister:
     def test_register_human(self, temp_db_env):
         """Register a human principal."""
         runner.invoke(app, ["init", "--json"])
-        result = runner.invoke(app, [
-            "register", "--name", "Skip Potter", "--type", "human", "--json",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "register",
+                "--name",
+                "Skip Potter",
+                "--type",
+                "human",
+                "--json",
+            ],
+        )
         assert result.exit_code == 0
         data = json.loads(result.stdout)
         assert data["name"] == "Skip Potter"
@@ -59,9 +67,17 @@ class TestCLIRegister:
     def test_register_agent(self, temp_db_env):
         """Register an agent principal."""
         runner.invoke(app, ["init", "--json"])
-        result = runner.invoke(app, [
-            "register", "--name", "Mary Wise", "--type", "agent", "--json",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "register",
+                "--name",
+                "Mary Wise",
+                "--type",
+                "agent",
+                "--json",
+            ],
+        )
         assert result.exit_code == 0
         data = json.loads(result.stdout)
         assert data["type"] == "agent"
@@ -71,9 +87,17 @@ class TestCLIProject:
     def test_create_project(self, temp_db_env):
         """Create a project with lattice and branch."""
         runner.invoke(app, ["init", "--json"])
-        result = runner.invoke(app, [
-            "project", "create", "NAS Migration", "--description", "Migrating GBrain", "--json",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "project",
+                "create",
+                "NAS Migration",
+                "--description",
+                "Migrating GBrain",
+                "--json",
+            ],
+        )
         assert result.exit_code == 0
         data = json.loads(result.stdout)
         assert data["name"] == "NAS Migration"
@@ -93,16 +117,28 @@ class TestCLIProject:
     def test_create_branch(self, temp_db_env):
         """Create a branch from an existing project."""
         runner.invoke(app, ["init", "--json"])
-        proj_result = runner.invoke(app, [
-            "project", "create", "Test", "--json",
-        ])
+        proj_result = runner.invoke(
+            app,
+            [
+                "project",
+                "create",
+                "Test",
+                "--json",
+            ],
+        )
         proj_data = json.loads(proj_result.stdout)
-        result = runner.invoke(app, [
-            "project", "create-branch",
-            "--project", proj_data["project_id"],
-            "--name", "experimental",
-            "--json",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "project",
+                "create-branch",
+                "--project",
+                proj_data["project_id"],
+                "--name",
+                "experimental",
+                "--json",
+            ],
+        )
         assert result.exit_code == 0
         data = json.loads(result.stdout)
         assert data["name"] == "experimental"
@@ -112,16 +148,26 @@ class TestCLIPolicy:
     def test_add_policy(self, temp_db_env):
         """Add a policy in draft status."""
         runner.invoke(app, ["init", "--json"])
-        result = runner.invoke(app, [
-            "policy", "add",
-            "--effect", "deny",
-            "--actions", '["db.drop"]',
-            "--resources", '["postgres://cloudhub/**"]',
-            "--scope", "global",
-            "--priority", "100",
-            "--description", "Never drop production",
-            "--json",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "policy",
+                "add",
+                "--effect",
+                "deny",
+                "--actions",
+                '["db.drop"]',
+                "--resources",
+                '["postgres://cloudhub/**"]',
+                "--scope",
+                "global",
+                "--priority",
+                "100",
+                "--description",
+                "Never drop production",
+                "--json",
+            ],
+        )
         assert result.exit_code == 0
         data = json.loads(result.stdout)
         assert data["status"] == "draft"
@@ -130,13 +176,20 @@ class TestCLIPolicy:
     def test_submit_policy(self, temp_db_env):
         """Submit a draft policy for approval."""
         runner.invoke(app, ["init", "--json"])
-        add_result = runner.invoke(app, [
-            "policy", "add",
-            "--effect", "deny",
-            "--actions", '["db.drop"]',
-            "--resources", '["postgres://**"]',
-            "--json",
-        ])
+        add_result = runner.invoke(
+            app,
+            [
+                "policy",
+                "add",
+                "--effect",
+                "deny",
+                "--actions",
+                '["db.drop"]',
+                "--resources",
+                '["postgres://**"]',
+                "--json",
+            ],
+        )
         policy_id = json.loads(add_result.stdout)["policy_id"]
         result = runner.invoke(app, ["policy", "submit", policy_id, "--json"])
         assert result.exit_code == 0
@@ -152,13 +205,20 @@ class TestCLIPolicy:
     def test_retire_policy(self, temp_db_env):
         """Retire a policy."""
         runner.invoke(app, ["init", "--json"])
-        add_result = runner.invoke(app, [
-            "policy", "add",
-            "--effect", "allow",
-            "--actions", '["db.select"]',
-            "--resources", '["postgres://**"]',
-            "--json",
-        ])
+        add_result = runner.invoke(
+            app,
+            [
+                "policy",
+                "add",
+                "--effect",
+                "allow",
+                "--actions",
+                '["db.select"]',
+                "--resources",
+                '["postgres://**"]',
+                "--json",
+            ],
+        )
         policy_id = json.loads(add_result.stdout)["policy_id"]
         result = runner.invoke(app, ["policy", "retire", policy_id, "--json"])
         assert result.exit_code == 0
@@ -170,9 +230,16 @@ class TestCLIAudit:
     def test_audit_verify_empty(self, temp_db_env):
         """Verify an empty lattice's audit chain."""
         runner.invoke(app, ["init", "--json"])
-        result = runner.invoke(app, [
-            "audit", "verify", "--lattice", "nonexistent", "--json",
-        ])
+        result = runner.invoke(
+            app,
+            [
+                "audit",
+                "verify",
+                "--lattice",
+                "nonexistent",
+                "--json",
+            ],
+        )
         assert result.exit_code == 0
         data = json.loads(result.stdout)
         assert data["valid"] is True

@@ -20,15 +20,17 @@ import pytest
 
 PRINCIPAL_TYPES = frozenset({"human", "agent", "service", "proxy"})
 
-ROLES = frozenset({
-    "observer",
-    "agent",
-    "policy_author",
-    "policy_approver",
-    "operator",
-    "auditor",
-    "administrator",
-})
+ROLES = frozenset(
+    {
+        "observer",
+        "agent",
+        "policy_author",
+        "policy_approver",
+        "operator",
+        "auditor",
+        "administrator",
+    }
+)
 
 
 class TestIdentityContract:
@@ -39,8 +41,13 @@ class TestIdentityContract:
 
     def test_roles_match_specification(self):
         assert ROLES == {
-            "observer", "agent", "policy_author", "policy_approver",
-            "operator", "auditor", "administrator",
+            "observer",
+            "agent",
+            "policy_author",
+            "policy_approver",
+            "operator",
+            "auditor",
+            "administrator",
         }
 
     def test_every_mutation_authenticates_principal(self):
@@ -110,9 +117,16 @@ class TestTransferPackageContract:
 
     def test_required_fields(self):
         assert set(TRANSFER_PACKAGE_FIELDS) == {
-            "schema_version", "package_version", "source_lattice_id",
-            "source_project_id", "snapshot_sequence", "created_at",
-            "content_hash", "signature", "signer_id", "trust_status",
+            "schema_version",
+            "package_version",
+            "source_lattice_id",
+            "source_project_id",
+            "snapshot_sequence",
+            "created_at",
+            "content_hash",
+            "signature",
+            "signer_id",
+            "trust_status",
             "lattice_state",
         }
 
@@ -145,6 +159,7 @@ class TestTransferPackageContract:
 # ---------------------------------------------------------------------------
 # Contract: action classification
 # ---------------------------------------------------------------------------
+
 
 class TestClassificationContract:
     """EP-CLASSIFY-001 through EP-CLASSIFY-006."""

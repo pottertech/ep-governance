@@ -59,7 +59,13 @@ def test_canonical_json_deterministic(value):
     assert canonical_json(value) == canonical_json(value)
 
 
-@given(st.dictionaries(st.text(min_size=1, max_size=10, alphabet=st.characters(blacklist_categories=("Cs", "Cc"))), json_values, max_size=10))
+@given(
+    st.dictionaries(
+        st.text(min_size=1, max_size=10, alphabet=st.characters(blacklist_categories=("Cs", "Cc"))),
+        json_values,
+        max_size=10,
+    )
+)
 @settings(max_examples=200)
 def test_canonical_json_key_order_independent(d):
     """Same dict with different key insertion order -> same canonical JSON."""
@@ -80,7 +86,13 @@ def test_canonical_hash_deterministic(value):
     assert canonical_hash(value) == canonical_hash(value)
 
 
-@given(st.dictionaries(st.text(min_size=1, max_size=10, alphabet=st.characters(blacklist_categories=("Cs", "Cc"))), json_values, max_size=10))
+@given(
+    st.dictionaries(
+        st.text(min_size=1, max_size=10, alphabet=st.characters(blacklist_categories=("Cs", "Cc"))),
+        json_values,
+        max_size=10,
+    )
+)
 @settings(max_examples=200)
 def test_canonical_hash_key_order_independent(d):
     """canonical_hash is independent of key insertion order."""
@@ -153,12 +165,14 @@ def test_canonical_hash_different_dicts(d):
 # --------------------------------------------------------------------------- #
 
 
-@given(st.dictionaries(
-    st.text(min_size=1, max_size=10, alphabet=st.characters(blacklist_categories=("Cs", "Cc"))),
-    json_primitives,
-    min_size=2,
-    max_size=20,
-))
+@given(
+    st.dictionaries(
+        st.text(min_size=1, max_size=10, alphabet=st.characters(blacklist_categories=("Cs", "Cc"))),
+        json_primitives,
+        min_size=2,
+        max_size=20,
+    )
+)
 @settings(max_examples=200)
 def test_sorted_keys_in_output(d):
     """canonical_json output has keys in sorted order at the top level."""

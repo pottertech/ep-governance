@@ -24,23 +24,29 @@ XID_ALPHABET = set("0123456789abcdefghijklmnopqrstuv")
 class TestXIDFormat:
     """XID format contract tests."""
 
-    @pytest.mark.parametrize("test_xid", [
-        "cjvbbvh6qgtnoiaaa001",
-        "00000000000000000000",
-        "vvvvvvvvvvvvvvvvvvvv",
-        "cjvbbvh6qgtnoiaaaabc",
-    ])
+    @pytest.mark.parametrize(
+        "test_xid",
+        [
+            "cjvbbvh6qgtnoiaaa001",
+            "00000000000000000000",
+            "vvvvvvvvvvvvvvvvvvvv",
+            "cjvbbvh6qgtnoiaaaabc",
+        ],
+    )
     def test_valid_xid_matches_pattern(self, test_xid: str):
         assert XID_PATTERN.match(test_xid) is not None
 
-    @pytest.mark.parametrize("invalid_xid", [
-        "cjvbbvh6qgtnoiaaa00",   # too short (18 chars)
-        "cjvbbvh6qgtnoiaaa0011", # too long (22 chars)
-        "cjvbbvh6qgtnoiaaa00w",  # 'w' not in base32hex
-        "Cjvbbvh6qgtnoiaaa001",  # uppercase not allowed
-        "cjvbbvh6qgtnoiaaa00-",  # dash not in alphabet
-        "",                       # empty
-    ])
+    @pytest.mark.parametrize(
+        "invalid_xid",
+        [
+            "cjvbbvh6qgtnoiaaa00",  # too short (18 chars)
+            "cjvbbvh6qgtnoiaaa0011",  # too long (22 chars)
+            "cjvbbvh6qgtnoiaaa00w",  # 'w' not in base32hex
+            "Cjvbbvh6qgtnoiaaa001",  # uppercase not allowed
+            "cjvbbvh6qgtnoiaaa00-",  # dash not in alphabet
+            "",  # empty
+        ],
+    )
     def test_invalid_xid_rejected(self, invalid_xid: str):
         assert XID_PATTERN.match(invalid_xid) is None
 

@@ -12,6 +12,7 @@ In advisory mode, ep_check and governance management tools are available.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 from typing import Any
 
@@ -90,6 +91,14 @@ ADVISORY_TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "agent_id": {"type": "string", "description": "Filter by agent XID (optional)"},
+                "branch_id": {
+                    "type": "string",
+                    "description": "Branch XID (scopes results to project)",
+                },
+                "project_id": {
+                    "type": "string",
+                    "description": "Project XID (scopes results to project)",
+                },
             },
         },
     ),
@@ -100,13 +109,33 @@ ADVISORY_TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "agent_id": {"type": "string", "description": "Filter by agent XID (optional)"},
+                "branch_id": {
+                    "type": "string",
+                    "description": "Branch XID (scopes results to project)",
+                },
+                "project_id": {
+                    "type": "string",
+                    "description": "Project XID (scopes results to project)",
+                },
             },
         },
     ),
     Tool(
         name="ep_pending_approvals",
         description="List pending approval requests.",
-        inputSchema={"type": "object", "properties": {}},
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "branch_id": {
+                    "type": "string",
+                    "description": "Branch XID (scopes results to project)",
+                },
+                "project_id": {
+                    "type": "string",
+                    "description": "Project XID (scopes results to project)",
+                },
+            },
+        },
     ),
     Tool(
         name="ep_approve",
@@ -179,12 +208,36 @@ ENFORCED_TOOLS: list[Tool] = [
     Tool(
         name="ep_list_policies",
         description="List active governance policies.",
-        inputSchema={"type": "object", "properties": {}},
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "branch_id": {
+                    "type": "string",
+                    "description": "Branch XID (scopes results to project)",
+                },
+                "project_id": {
+                    "type": "string",
+                    "description": "Project XID (scopes results to project)",
+                },
+            },
+        },
     ),
     Tool(
         name="ep_pending_approvals",
         description="List pending approval requests.",
-        inputSchema={"type": "object", "properties": {}},
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "branch_id": {
+                    "type": "string",
+                    "description": "Branch XID (scopes results to project)",
+                },
+                "project_id": {
+                    "type": "string",
+                    "description": "Project XID (scopes results to project)",
+                },
+            },
+        },
     ),
     Tool(
         name="ep_approve",
@@ -369,10 +422,10 @@ def _check_role(
     """Check whether *principal_id* holds any of *required_roles*.
 
     Queries ``ep_role_bindings`` joined with ``ep_roles`` to determine the
-    principal's roles.  If the principal has no role bindings at all, an
-    ``administrator``-type principal is allowed to do everything (for
-    initial setup / bootstrapping).  Other principals with no role bindings
-    are denied.
+    principal's roles.  Fail closed: if no role bindings exist, access is
+    denied unless ``EP_BOOTSTRAP_MODE=true`` is set in the environment, in
+    which case the first human principal is allowed access for initial
+    bootstrapping.
 
     Returns ``None`` if authorized, or an error dict if denied.
     """
@@ -401,15 +454,31 @@ def _check_role(
             )
         }
 
-    # No role bindings exist — allow human principals for bootstrapping.
-    repo = PrincipalRepository(conn)
-    principal = repo.get_principal(principal_id)
-    if principal and principal.get("type") in ("human", "administrator"):
-        return None
+    # No role bindings exist — fail closed.
+    # The ONLY exception is explicit bootstrap mode (EP_BOOTSTRAP_MODE=true),
+    # which allows the first human principal to access for initial setup.
+    # This must be turned off after bootstrapping is complete.
+    bootstrap_mode = os.environ.get("EP_BOOTSTRAP_MODE", "").lower() == "true"
+    if bootstrap_mode:
+        repo = PrincipalRepository(conn)
+        principal = repo.get_principal(principal_id)
+        if principal and principal.get("type") == "human":
+            # Verify this is truly the first human (no other humans have
+            # role bindings yet) to limit bootstrap access to initial setup.
+            human_with_roles = conn.execute(
+                sa.text(
+                    "SELECT COUNT(*) FROM ep_role_bindings rb "
+                    "JOIN ep_principals p ON rb.principal_id = p.id "
+                    "WHERE p.type = 'human'"
+                )
+            ).scalar()
+            if human_with_roles == 0:
+                return None
+
     return {
         "error": (
-            f"Principal '{principal_id}' has no role bindings and is not an "
-            "administrator; access denied."
+            f"Principal '{principal_id}' has no role bindings; access denied. "
+            "Set EP_BOOTSTRAP_MODE=true for initial setup."
         )
     }
 
@@ -434,6 +503,38 @@ def _get_ep_service_id(conn: Any) -> str:
     )
     conn.commit()
     return p["id"]
+
+
+def _resolve_project_id(conn: Any, args: dict[str, Any]) -> str | None:
+    """Resolve the project_id from the arguments.
+
+    If ``project_id`` is provided directly, use it.  If ``branch_id`` is
+    provided, resolve it to its project_id via the lattice.  If neither is
+    provided, return ``None`` (callers should return empty results to avoid
+    cross-project data leakage).
+    """
+    import sqlalchemy as sa
+
+    project_id = args.get("project_id")
+    if project_id:
+        return project_id
+
+    branch_id = args.get("branch_id")
+    if branch_id:
+        result = conn.execute(
+            sa.text(
+                "SELECT l.project_id "
+                "FROM ep_branches b "
+                "JOIN ep_lattices l ON b.lattice_id = l.id "
+                "WHERE b.id = :branch_id"
+            ),
+            {"branch_id": branch_id},
+        )
+        row = result.fetchone()
+        if row:
+            return row[0]
+
+    return None
 
 
 def _ep_check(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any]:
@@ -484,17 +585,37 @@ def _ep_status(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
 def _ep_log(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     import sqlalchemy as sa
 
+    # High fix 5: filter by project_id to prevent cross-project data leakage.
+    project_id = _resolve_project_id(conn, args)
+    if project_id is None:
+        # No project_id or branch_id provided — return empty results.
+        return {"transitions": []}
+
     result = conn.execute(
         sa.text(
-            "SELECT id, agent_id, branch_id, tool, stage, created_at "
-            "FROM ep_transitions ORDER BY created_at DESC LIMIT 20"
-        )
+            "SELECT t.id, t.agent_id, t.branch_id, t.tool, t.stage, t.created_at "
+            "FROM ep_transitions t "
+            "JOIN ep_branches b ON t.branch_id = b.id "
+            "JOIN ep_lattices l ON b.lattice_id = l.id "
+            "WHERE l.project_id = :project_id "
+            "ORDER BY t.created_at DESC LIMIT 20"
+        ),
+        {"project_id": project_id},
     )
     rows = [dict(r._mapping) for r in result.fetchall()]
     return {"transitions": rows}
 
 
 def _ep_list_policies(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
+    # High fix 5: filter by project_id to prevent cross-project data leakage.
+    # ep_policies has no direct project_id column — policies are global or
+    # agent-scoped.  However, we still require a project context (via
+    # project_id or branch_id) so the caller is scoped to a single project.
+    # If no project context is provided, return empty results.
+    project_id = _resolve_project_id(conn, args)
+    if project_id is None:
+        return {"policies": []}
+
     repo = PolicyRepository(conn)
     policies = repo.list_active_policies()
     return {"policies": policies}
@@ -503,11 +624,23 @@ def _ep_list_policies(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
 def _ep_pending_approvals(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     import sqlalchemy as sa
 
+    # High fix 5: filter by project_id to prevent cross-project data leakage.
+    project_id = _resolve_project_id(conn, args)
+    if project_id is None:
+        return {"pending_approvals": []}
+
     result = conn.execute(
         sa.text(
-            "SELECT id, transition_id, policy_id, requested_by, justification, status "
-            "FROM ep_approval_requests WHERE status='pending' ORDER BY created_at"
-        )
+            "SELECT ar.id, ar.transition_id, ar.policy_id, ar.requested_by, "
+            "ar.justification, ar.status "
+            "FROM ep_approval_requests ar "
+            "JOIN ep_transitions t ON ar.transition_id = t.id "
+            "JOIN ep_branches b ON t.branch_id = b.id "
+            "JOIN ep_lattices l ON b.lattice_id = l.id "
+            "WHERE ar.status = 'pending' AND l.project_id = :project_id "
+            "ORDER BY ar.created_at"
+        ),
+        {"project_id": project_id},
     )
     rows = [dict(r._mapping) for r in result.fetchall()]
     return {"pending_approvals": rows}

@@ -71,6 +71,52 @@ class PostgresProxy(GovernedProxy):
             )
         return self._target_engine
 
+    def _validate_adapter_payload(
+        self,
+        payload: dict[str, Any],
+        token: AuthorizationToken,
+    ) -> str | None:
+        """Validate the PostgreSQL payload before claiming the token.
+
+        Checks adapter-specific constraints WITHOUT side effects:
+        - SQL is present in the payload
+        - The SQL can be classified (not opaque)
+        - The operation is not in the forbidden set
+
+        Returns ``None`` if valid, or an error message string.
+        """
+        # Extract SQL from payload
+        sql = payload.get("sql") or payload.get("query") or payload.get("statement")
+        if not sql:
+            return "No SQL statement in payload"
+
+        # Classify the SQL
+        classifier = get_classifier("postgres.execute")
+        if classifier is None:
+            return "No classifier available for postgres.execute"
+
+        try:
+            classification = classifier.classify("postgres.execute", payload)
+        except ClassificationError as exc:
+            return f"Classification failed: {exc!s}"
+
+        # Check for opaque classification
+        if classification.opaque:
+            return "SQL classification is opaque — requires explicit approval"
+
+        # Extract operation type from classification
+        action_type = classification.action_type
+        # Normalize: "postgres.execute.select" -> "select"
+        operation = (
+            action_type.rsplit(".", 1)[-1].lower() if "." in action_type else action_type.lower()
+        )
+
+        # Check forbidden operations
+        if operation in FORBIDDEN_OPERATIONS:
+            return f"Operation '{operation}' is forbidden by the proxy"
+
+        return None
+
     def _execute_adapter(
         self,
         payload: dict[str, Any],
@@ -159,6 +205,18 @@ class PostgresProxy(GovernedProxy):
         # Execute the SQL
         try:
             with self.target_engine.connect() as target_conn:
+                # High fix 7: enforce statement and lock timeouts at the
+                # database level. SET LOCAL applies only to the current
+                # transaction and is automatically reset on COMMIT/ROLLBACK.
+                # Only apply to PostgreSQL — SQLite does not support these.
+                if self.target_engine.dialect.name != "sqlite":
+                    target_conn.execute(
+                        sa.text(
+                            f"SET LOCAL statement_timeout = '{self.config.timeout_seconds * 1000}'"
+                        )
+                    )
+                    target_conn.execute(sa.text("SET LOCAL lock_timeout = '5000'"))
+
                 if operation == "select":
                     # High fix 11: bound result set to prevent memory exhaustion
                     result = target_conn.execute(sa.text(sql))

@@ -16,13 +16,15 @@ import pytest
 # Contract: risk domains
 # ---------------------------------------------------------------------------
 
-RISK_DOMAINS = frozenset({
-    "production_database",
-    "external_communications",
-    "deployment",
-    "data_privacy",
-    "security",
-})
+RISK_DOMAINS = frozenset(
+    {
+        "production_database",
+        "external_communications",
+        "deployment",
+        "data_privacy",
+        "security",
+    }
+)
 
 REQUIRED_RISK_ASSESSMENT_FIELDS = [
     "domain",
@@ -79,9 +81,16 @@ class TestRiskAssessmentFields:
 
     def test_all_required_fields_present(self):
         assert set(REQUIRED_RISK_ASSESSMENT_FIELDS) == {
-            "domain", "risk_increment", "inherent_risk",
-            "mitigation_credit", "residual_risk", "threshold",
-            "decision", "accepted_by", "accepted_at", "expiration",
+            "domain",
+            "risk_increment",
+            "inherent_risk",
+            "mitigation_credit",
+            "residual_risk",
+            "threshold",
+            "decision",
+            "accepted_by",
+            "accepted_at",
+            "expiration",
         }
 
     def test_decision_enum_values(self):

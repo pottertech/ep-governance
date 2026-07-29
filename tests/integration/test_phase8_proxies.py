@@ -13,7 +13,13 @@ import sqlalchemy as sa
 
 from ep_governance.db.postgres import create_engine, is_sqlite
 from ep_governance.db import run_migrations
-from ep_governance.db.repositories import PrincipalRepository, ProjectRepository, LatticeRepository, BranchRepository, PolicyRepository
+from ep_governance.db.repositories import (
+    PrincipalRepository,
+    ProjectRepository,
+    LatticeRepository,
+    BranchRepository,
+    PolicyRepository,
+)
 from ep_governance.xid import XID
 from ep_governance.authorizations import KeyManager, AuthorizationEngine
 from ep_governance.proxy.base import ProxyConfig, ExecutionResult
@@ -49,8 +55,11 @@ def conn(engine):
 def ep_service_id(conn):
     repo = PrincipalRepository(conn)
     p = repo.insert_principal(
-        principal_id=str(XID.new()), name="EP Service", type="service",
-        machine=None, description="EP service",
+        principal_id=str(XID.new()),
+        name="EP Service",
+        type="service",
+        machine=None,
+        description="EP service",
     )
     conn.commit()
     return p["id"]
@@ -78,11 +87,20 @@ class TestFileProxy:
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
-            authorization_id="test", transition_id="test", agent_id="test",
-            project_id="test", branch_id="test", proxy_audience="file-proxy",
-            tool="file.read", payload_hash="test", policy_set_hash="test",
-            matched_policy_versions={}, issued_at="", expires_at="",
-            nonce="n", signature="",
+            authorization_id="test",
+            transition_id="test",
+            agent_id="test",
+            project_id="test",
+            branch_id="test",
+            proxy_audience="file-proxy",
+            tool="file.read",
+            payload_hash="test",
+            policy_set_hash="test",
+            matched_policy_versions={},
+            issued_at="",
+            expires_at="",
+            nonce="n",
+            signature="",
         )
         result = proxy._execute_adapter(
             {"operation": "read", "path": "/etc/hosts"}, token, "attempt1"
@@ -96,14 +114,30 @@ class TestFileProxy:
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
-            "t", "t", "t", "t", "t", "file-proxy", "file.chmod",
-            "h", "h", {}, "", "", "", "",
+            "t",
+            "t",
+            "t",
+            "t",
+            "t",
+            "file-proxy",
+            "file.chmod",
+            "h",
+            "h",
+            {},
+            "",
+            "",
+            "",
+            "",
         )
         result = proxy._execute_adapter(
             {"operation": "chmod", "path": "/tmp/test", "mode": "755"}, token, "a1"
         )
         assert result.success is False
-        assert "forbidden" in result.result_summary.lower() or "unknown" in result.result_summary.lower() or "requires approval" in result.result_summary.lower()
+        assert (
+            "forbidden" in result.result_summary.lower()
+            or "unknown" in result.result_summary.lower()
+            or "requires approval" in result.result_summary.lower()
+        )
 
     def test_relative_path_rejected(self, conn, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("file:///tmp", "file-proxy", ep_service_id)
@@ -111,12 +145,22 @@ class TestFileProxy:
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
-            "t", "t", "t", "t", "t", "file-proxy", "file.read",
-            "h", "h", {}, "", "", "", "",
+            "t",
+            "t",
+            "t",
+            "t",
+            "t",
+            "file-proxy",
+            "file.read",
+            "h",
+            "h",
+            {},
+            "",
+            "",
+            "",
+            "",
         )
-        result = proxy._execute_adapter(
-            {"operation": "read", "path": "relative/path"}, token, "a1"
-        )
+        result = proxy._execute_adapter({"operation": "read", "path": "relative/path"}, token, "a1")
         assert result.success is False
         assert "absolute" in result.result_summary.lower()
 
@@ -128,12 +172,22 @@ class TestDockerProxy:
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
-            "t", "t", "t", "t", "t", "docker-proxy", "docker.ps",
-            "h", "h", {}, "", "", "", "",
+            "t",
+            "t",
+            "t",
+            "t",
+            "t",
+            "docker-proxy",
+            "docker.ps",
+            "h",
+            "h",
+            {},
+            "",
+            "",
+            "",
+            "",
         )
-        result = proxy._execute_adapter(
-            {"command": "docker ps"}, token, "a1"
-        )
+        result = proxy._execute_adapter({"command": "docker ps"}, token, "a1")
         assert result.success is True
 
     def test_rm_restricted(self, conn, auth_engine, key_manager, ep_service_id):
@@ -143,14 +197,27 @@ class TestDockerProxy:
 
         # Token authorizes docker.ps, not docker.rm
         token = AuthorizationToken(
-            "t", "t", "t", "t", "t", "docker-proxy", "docker.ps",
-            "h", "h", {}, "", "", "", "",
+            "t",
+            "t",
+            "t",
+            "t",
+            "t",
+            "docker-proxy",
+            "docker.ps",
+            "h",
+            "h",
+            {},
+            "",
+            "",
+            "",
+            "",
         )
-        result = proxy._execute_adapter(
-            {"command": "docker rm test-container"}, token, "a1"
-        )
+        result = proxy._execute_adapter({"command": "docker rm test-container"}, token, "a1")
         assert result.success is False
-        assert "does not match" in result.result_summary.lower() or "restricted" in result.result_summary.lower()
+        assert (
+            "does not match" in result.result_summary.lower()
+            or "restricted" in result.result_summary.lower()
+        )
 
 
 class TestEmailProxy:
@@ -160,12 +227,23 @@ class TestEmailProxy:
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
-            "t", "t", "t", "t", "t", "email-proxy", "email.send",
-            "h", "h", {}, "", "", "", "",
+            "t",
+            "t",
+            "t",
+            "t",
+            "t",
+            "email-proxy",
+            "email.send",
+            "h",
+            "h",
+            {},
+            "",
+            "",
+            "",
+            "",
         )
         result = proxy._execute_adapter(
-            {"to": ["test@example.com"], "subject": "Test", "body": "Hello"},
-            token, "a1"
+            {"to": ["test@example.com"], "subject": "Test", "body": "Hello"}, token, "a1"
         )
         assert result.success is True
         # Body must NOT be in result_summary (privacy)
@@ -177,12 +255,22 @@ class TestEmailProxy:
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
-            "t", "t", "t", "t", "t", "email-proxy", "email.send",
-            "h", "h", {}, "", "", "", "",
+            "t",
+            "t",
+            "t",
+            "t",
+            "t",
+            "email-proxy",
+            "email.send",
+            "h",
+            "h",
+            {},
+            "",
+            "",
+            "",
+            "",
         )
-        result = proxy._execute_adapter(
-            {"to": [], "subject": "Test", "body": "Hello"}, token, "a1"
-        )
+        result = proxy._execute_adapter({"to": [], "subject": "Test", "body": "Hello"}, token, "a1")
         assert result.success is False
         assert "recipient" in result.result_summary.lower()
 
@@ -194,12 +282,22 @@ class TestGitProxy:
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
-            "t", "t", "t", "t", "t", "git-proxy", "git.status",
-            "h", "h", {}, "", "", "", "",
+            "t",
+            "t",
+            "t",
+            "t",
+            "t",
+            "git-proxy",
+            "git.status",
+            "h",
+            "h",
+            {},
+            "",
+            "",
+            "",
+            "",
         )
-        result = proxy._execute_adapter(
-            {"command": "git status", "repo": "/tmp/repo"}, token, "a1"
-        )
+        result = proxy._execute_adapter({"command": "git status", "repo": "/tmp/repo"}, token, "a1")
         # Git status may be classified as opaque by the proxy — that's acceptable
         # as long as it doesn't crash. The important thing is it returns a result.
         assert result is not None
@@ -211,12 +309,23 @@ class TestGitProxy:
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
-            "t", "t", "t", "t", "t", "git-proxy", "git.push",
-            "h", "h", {}, "", "", "", "",
+            "t",
+            "t",
+            "t",
+            "t",
+            "t",
+            "git-proxy",
+            "git.push",
+            "h",
+            "h",
+            {},
+            "",
+            "",
+            "",
+            "",
         )
         result = proxy._execute_adapter(
-            {"command": "git push --force origin main", "repo": "/tmp/repo"},
-            token, "a1"
+            {"command": "git push --force origin main", "repo": "/tmp/repo"}, token, "a1"
         )
         assert result.success is False
         # The proxy may classify force push as opaque or detect the force pattern
@@ -230,12 +339,23 @@ class TestHTTPProxy:
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
-            "t", "t", "t", "t", "t", "http-proxy", "http.get",
-            "h", "h", {}, "", "", "", "",
+            "t",
+            "t",
+            "t",
+            "t",
+            "t",
+            "http-proxy",
+            "http.get",
+            "h",
+            "h",
+            {},
+            "",
+            "",
+            "",
+            "",
         )
         result = proxy._execute_adapter(
-            {"method": "GET", "url": "https://api.example.com/v1/status"},
-            token, "a1"
+            {"method": "GET", "url": "https://api.example.com/v1/status"}, token, "a1"
         )
         assert result.success is True
 
@@ -245,14 +365,28 @@ class TestHTTPProxy:
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
-            "t", "t", "t", "t", "t", "http-proxy", "http.connect",
-            "h", "h", {}, "", "", "", "",
+            "t",
+            "t",
+            "t",
+            "t",
+            "t",
+            "http-proxy",
+            "http.connect",
+            "h",
+            "h",
+            {},
+            "",
+            "",
+            "",
+            "",
         )
-        result = proxy._execute_adapter(
-            {"method": "CONNECT", "url": "evil.com:443"}, token, "a1"
-        )
+        result = proxy._execute_adapter({"method": "CONNECT", "url": "evil.com:443"}, token, "a1")
         assert result.success is False
-        assert "forbidden" in result.result_summary.lower() or "unknown" in result.result_summary.lower() or "requires approval" in result.result_summary.lower()
+        assert (
+            "forbidden" in result.result_summary.lower()
+            or "unknown" in result.result_summary.lower()
+            or "requires approval" in result.result_summary.lower()
+        )
 
 
 class TestShellProxy:
@@ -262,12 +396,22 @@ class TestShellProxy:
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
-            "t", "t", "t", "t", "t", "shell-proxy", "shell.exec.ls",
-            "h", "h", {}, "", "", "", "",
+            "t",
+            "t",
+            "t",
+            "t",
+            "t",
+            "shell-proxy",
+            "shell.exec.ls",
+            "h",
+            "h",
+            {},
+            "",
+            "",
+            "",
+            "",
         )
-        result = proxy._execute_adapter(
-            {"command": "ls -la /tmp"}, token, "a1"
-        )
+        result = proxy._execute_adapter({"command": "ls -la /tmp"}, token, "a1")
         assert result.success is True
 
     def test_eval_opaque_rejected(self, conn, auth_engine, key_manager, ep_service_id):
@@ -276,14 +420,29 @@ class TestShellProxy:
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
-            "t", "t", "t", "t", "t", "shell-proxy", "shell.exec.opaque",
-            "h", "h", {}, "", "", "", "",
+            "t",
+            "t",
+            "t",
+            "t",
+            "t",
+            "shell-proxy",
+            "shell.exec.opaque",
+            "h",
+            "h",
+            {},
+            "",
+            "",
+            "",
+            "",
         )
         result = proxy._execute_adapter(
             {"command": "eval $(base64 -d <<< ZWNobyBoZWxsbw==)"}, token, "a1"
         )
         assert result.success is False
-        assert "opaque" in result.result_summary.lower() or "dangerous" in result.result_summary.lower()
+        assert (
+            "opaque" in result.result_summary.lower()
+            or "dangerous" in result.result_summary.lower()
+        )
 
     def test_dangerous_command_rejected(self, conn, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("shell://localhost", "shell-proxy", ep_service_id)
@@ -291,12 +450,22 @@ class TestShellProxy:
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
-            "t", "t", "t", "t", "t", "shell-proxy", "shell.exec.rm",
-            "h", "h", {}, "", "", "", "",
+            "t",
+            "t",
+            "t",
+            "t",
+            "t",
+            "shell-proxy",
+            "shell.exec.rm",
+            "h",
+            "h",
+            {},
+            "",
+            "",
+            "",
+            "",
         )
-        result = proxy._execute_adapter(
-            {"command": "rm -rf /"}, token, "a1"
-        )
+        result = proxy._execute_adapter({"command": "rm -rf /"}, token, "a1")
         assert result.success is False
         # rm is in dangerous patterns or not in safe commands
         assert result.success is False

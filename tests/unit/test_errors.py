@@ -29,27 +29,30 @@ from ep_governance.errors import (
 
 
 class TestErrorHierarchy:
-    @pytest.mark.parametrize("err_class", [
-        ConfigError,
-        AuthenticationError,
-        AuthorizationError,
-        PolicyError,
-        PolicyConflictError,
-        TransitionError,
-        IllegalTransitionError,
-        StaleHeadError,
-        TokenError,
-        TokenExpiredError,
-        TokenUsedError,
-        TokenInvalidError,
-        ClassificationError,
-        ResourceCanonicalizationError,
-        RiskError,
-        AuditError,
-        AuditChainError,
-        TransferError,
-        XIDError,
-    ])
+    @pytest.mark.parametrize(
+        "err_class",
+        [
+            ConfigError,
+            AuthenticationError,
+            AuthorizationError,
+            PolicyError,
+            PolicyConflictError,
+            TransitionError,
+            IllegalTransitionError,
+            StaleHeadError,
+            TokenError,
+            TokenExpiredError,
+            TokenUsedError,
+            TokenInvalidError,
+            ClassificationError,
+            ResourceCanonicalizationError,
+            RiskError,
+            AuditError,
+            AuditChainError,
+            TransferError,
+            XIDError,
+        ],
+    )
     def test_all_errors_derive_from_eperror(self, err_class):
         assert issubclass(err_class, EPError)
 

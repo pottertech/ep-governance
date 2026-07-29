@@ -28,6 +28,11 @@ def temp_db_env(monkeypatch, tmp_path):
     db_path = str(tmp_path / "test_ep_mcp.db")
     monkeypatch.setenv("EP_DB_URL", f"sqlite:///{db_path}")
     monkeypatch.setenv("EP_MODE", "enforced")
+    monkeypatch.setenv("EP_BOOTSTRAP_MODE", "true")
+    # Enable bootstrap mode for tests so the test human principal can access
+    # tools without explicit role bindings (the _check_role fallback was
+    # removed for security — tests must opt in via EP_BOOTSTRAP_MODE).
+    monkeypatch.setenv("EP_BOOTSTRAP_MODE", "true")
     yield db_path
 
 

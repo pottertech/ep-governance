@@ -35,13 +35,13 @@ REQUIRED_TOKEN_FIELDS = [
 ]
 
 TOKEN_BINDING_PROPERTIES = [
-    "short_lived",       # expires_at - issued_at is small (default 5 minutes)
-    "payload_bound",     # payload_hash must match on execution
-    "agent_bound",       # agent_id is in the token
-    "project_bound",     # project_id is in the token
-    "branch_bound",      # branch_id is in the token
-    "proxy_bound",       # proxy_audience is in the token
-    "single_use",        # used flag, atomic claim
+    "short_lived",  # expires_at - issued_at is small (default 5 minutes)
+    "payload_bound",  # payload_hash must match on execution
+    "agent_bound",  # agent_id is in the token
+    "project_bound",  # project_id is in the token
+    "branch_bound",  # branch_id is in the token
+    "proxy_bound",  # proxy_audience is in the token
+    "single_use",  # used flag, atomic claim
     "policy_set_bound",  # policy_set_hash and matched_policy_versions
 ]
 
@@ -51,11 +51,20 @@ class TestAuthorizationTokenContract:
 
     def test_all_required_token_fields_present(self):
         assert set(REQUIRED_TOKEN_FIELDS) == {
-            "authorization_id", "transition_id", "agent_id",
-            "project_id", "branch_id", "proxy_audience",
-            "tool", "payload_hash", "policy_set_hash",
-            "matched_policy_versions", "issued_at", "expires_at",
-            "nonce", "signature",
+            "authorization_id",
+            "transition_id",
+            "agent_id",
+            "project_id",
+            "branch_id",
+            "proxy_audience",
+            "tool",
+            "payload_hash",
+            "policy_set_hash",
+            "matched_policy_versions",
+            "issued_at",
+            "expires_at",
+            "nonce",
+            "signature",
         }
 
     def test_token_has_14_required_fields(self):

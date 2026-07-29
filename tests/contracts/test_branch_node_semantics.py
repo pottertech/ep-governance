@@ -18,25 +18,29 @@ import pytest
 # Contract: node statuses (v1.1.1 section 2)
 # ---------------------------------------------------------------------------
 
-NODE_STATUSES = frozenset({
-    "committed",
-    "quarantined",
-    "at_risk",
-    "superseded",
-    "archived",
-})
+NODE_STATUSES = frozenset(
+    {
+        "committed",
+        "quarantined",
+        "at_risk",
+        "superseded",
+        "archived",
+    }
+)
 
 # Stages that MUST NOT create graph nodes (v1.1.1 section 2)
-NON_REALIZED_STAGES = frozenset({
-    "proposed",
-    "pending_approval",
-    "authorized",
-    "executing",
-    "denied",
-    "failed",
-    "expired",
-    "cancelled",
-})
+NON_REALIZED_STAGES = frozenset(
+    {
+        "proposed",
+        "pending_approval",
+        "authorized",
+        "executing",
+        "denied",
+        "failed",
+        "expired",
+        "cancelled",
+    }
+)
 
 # Only stage that creates a graph node
 REALIZED_STAGE = "succeeded"
@@ -57,10 +61,18 @@ class TestNodeLifecycle:
     def test_v11_intention_statuses_are_not_node_statuses(self):
         """v1.1 listed proposed/authorized/executing/failed/denied/cancelled/expired
         as node statuses. v1.1.1 corrected this: only realized states become nodes."""
-        v11_incorrect_statuses = frozenset({
-            "proposed", "authorized", "executing", "succeeded",
-            "failed", "cancelled", "expired", "denied",
-        })
+        v11_incorrect_statuses = frozenset(
+            {
+                "proposed",
+                "authorized",
+                "executing",
+                "succeeded",
+                "failed",
+                "cancelled",
+                "expired",
+                "denied",
+            }
+        )
         # Only 'succeeded' maps to a node (as 'committed'), but 'succeeded'
         # is a transition stage, not a node status.
         assert v11_incorrect_statuses.isdisjoint(NODE_STATUSES)

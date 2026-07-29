@@ -164,9 +164,7 @@ class TestCanonicalizeGit:
     """Tests for git:// canonicalization (EP-RESOURCE-005)."""
 
     def test_git_basic(self):
-        result = canonicalize_resource(
-            "git://github.com/pottertech/ep-governance/branch/main"
-        )
+        result = canonicalize_resource("git://github.com/pottertech/ep-governance/branch/main")
         assert result.scheme == "git"
         assert result.canonical == "git://github.com/pottertech/ep-governance/branch/main"
 
@@ -263,35 +261,50 @@ class TestMatchGlob:
     """Tests for match_glob with glob patterns."""
 
     def test_exact_match(self):
-        assert match_glob(
-            "postgres://cloudhub/gbrain_pilot/public/memory_items",
-            "postgres://cloudhub/gbrain_pilot/public/memory_items",
-        ) is True
+        assert (
+            match_glob(
+                "postgres://cloudhub/gbrain_pilot/public/memory_items",
+                "postgres://cloudhub/gbrain_pilot/public/memory_items",
+            )
+            is True
+        )
 
     def test_single_wildcard(self):
-        assert match_glob(
-            "postgres://cloudhub/*",
-            "postgres://cloudhub/gbrain_pilot/public/memory_items",
-        ) is True
+        assert (
+            match_glob(
+                "postgres://cloudhub/*",
+                "postgres://cloudhub/gbrain_pilot/public/memory_items",
+            )
+            is True
+        )
 
     def test_double_wildcard_matches_multiple_segments(self):
         """** wildcards match across path segments."""
-        assert match_glob(
-            "postgres://cloudhub/**",
-            "postgres://cloudhub/gbrain_pilot/public/memory_items",
-        ) is True
+        assert (
+            match_glob(
+                "postgres://cloudhub/**",
+                "postgres://cloudhub/gbrain_pilot/public/memory_items",
+            )
+            is True
+        )
 
     def test_double_wildcard_in_middle(self):
-        assert match_glob(
-            "postgres://**/memory_items",
-            "postgres://cloudhub/gbrain_pilot/public/memory_items",
-        ) is True
+        assert (
+            match_glob(
+                "postgres://**/memory_items",
+                "postgres://cloudhub/gbrain_pilot/public/memory_items",
+            )
+            is True
+        )
 
     def test_no_match(self):
-        assert match_glob(
-            "postgres://otherhost/*",
-            "postgres://cloudhub/gbrain_pilot/public/memory_items",
-        ) is False
+        assert (
+            match_glob(
+                "postgres://otherhost/*",
+                "postgres://cloudhub/gbrain_pilot/public/memory_items",
+            )
+            is False
+        )
 
     def test_empty_pattern_returns_false(self):
         assert match_glob("", "postgres://cloudhub/db") is False

@@ -18,57 +18,63 @@ import pytest
 # Contract: transition stage vocabulary
 # ---------------------------------------------------------------------------
 
-LEGAL_STAGES = frozenset({
-    "proposed",
-    "pending_approval",
-    "authorized",
-    "executing",
-    "succeeded",
-    "failed",
-    "execution_uncertain",
-    "cancelled",
-    "expired",
-    "denied",
-})
+LEGAL_STAGES = frozenset(
+    {
+        "proposed",
+        "pending_approval",
+        "authorized",
+        "executing",
+        "succeeded",
+        "failed",
+        "execution_uncertain",
+        "cancelled",
+        "expired",
+        "denied",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
 # Contract: legal transitions
 # ---------------------------------------------------------------------------
 
-LEGAL_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
-    # proposed
-    ("proposed", "denied"),
-    ("proposed", "pending_approval"),
-    ("proposed", "authorized"),
-    ("proposed", "cancelled"),
-    # pending_approval
-    ("pending_approval", "authorized"),
-    ("pending_approval", "denied"),
-    ("pending_approval", "expired"),
-    ("pending_approval", "cancelled"),
-    # authorized
-    ("authorized", "executing"),
-    ("authorized", "expired"),
-    ("authorized", "cancelled"),
-    # executing
-    ("executing", "succeeded"),
-    ("executing", "failed"),
-    ("executing", "execution_uncertain"),
-    # execution_uncertain
-    ("execution_uncertain", "succeeded"),
-    ("execution_uncertain", "failed"),
-    # requires_manual_reconciliation is a flag, not a stage.
-    # See docs/state-machines.md.
-})
+LEGAL_TRANSITIONS: frozenset[tuple[str, str]] = frozenset(
+    {
+        # proposed
+        ("proposed", "denied"),
+        ("proposed", "pending_approval"),
+        ("proposed", "authorized"),
+        ("proposed", "cancelled"),
+        # pending_approval
+        ("pending_approval", "authorized"),
+        ("pending_approval", "denied"),
+        ("pending_approval", "expired"),
+        ("pending_approval", "cancelled"),
+        # authorized
+        ("authorized", "executing"),
+        ("authorized", "expired"),
+        ("authorized", "cancelled"),
+        # executing
+        ("executing", "succeeded"),
+        ("executing", "failed"),
+        ("executing", "execution_uncertain"),
+        # execution_uncertain
+        ("execution_uncertain", "succeeded"),
+        ("execution_uncertain", "failed"),
+        # requires_manual_reconciliation is a flag, not a stage.
+        # See docs/state-machines.md.
+    }
+)
 
-TERMINAL_STAGES = frozenset({
-    "succeeded",
-    "failed",
-    "cancelled",
-    "expired",
-    "denied",
-})
+TERMINAL_STAGES = frozenset(
+    {
+        "succeeded",
+        "failed",
+        "cancelled",
+        "expired",
+        "denied",
+    }
+)
 
 
 class TestTransitionVocabulary:
@@ -225,7 +231,9 @@ class TestIdempotencyContract:
 
     IDEMPOTENT_RETURN_EXISTING = frozenset({"proposed", "authorized", "pending_approval"})
     IDEMPOTENT_RETURN_RESULT = frozenset({"executing", "succeeded"})
-    IDEMPOTENT_ALLOW_NEW = frozenset({"failed", "cancelled", "expired", "denied", "execution_uncertain"})
+    IDEMPOTENT_ALLOW_NEW = frozenset(
+        {"failed", "cancelled", "expired", "denied", "execution_uncertain"}
+    )
 
     def test_all_stages_covered_by_idempotency_rule(self):
         all_stages = (

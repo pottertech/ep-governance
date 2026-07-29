@@ -25,11 +25,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import OperationalError
 
 from ..authorizations import AuthorizationEngine, AuthorizationToken
 from ..branches import BranchCommitter
 from ..canonical import canonical_hash
 from ..classification import get_classifier
+from ..db.transactions import serializable_transaction
+from ..errors import IllegalTransitionError
 from ..policy_engine import PolicyEngine
 from ..transitions import TransitionEngine
 from ..xid import XID
@@ -163,104 +166,145 @@ class GovernedProxy(ABC):
                 completed_at=self._now_iso(),
             )
 
-        # Step 5: Recompute the current effective policy set and check for
-        # staleness (Critical fix 1).
-        # The previous implementation compared token.policy_set_hash to the
-        # same hash stored in the authorization record — which was set at
-        # issuance time and therefore always matched.  Instead, we classify
-        # the payload, evaluate the current active policies from the database,
-        # compute a fresh policy_set_hash, and compare it to the token's hash.
-        # We also verify that no new deny or require_approval policy blocks
-        # the action.
-        if self.policy_engine is not None:
-            # 5a. Classify the payload using the same classifier used at proposal.
-            classifier = get_classifier(token.tool)
-            if classifier is None:
-                return ExecutionResult(
-                    success=False,
-                    exit_status="failure",
-                    result_summary=f"No classifier available for tool '{token.tool}'",
-                    execution_attempt_id=attempt_id,
-                    started_at=started_at,
-                    completed_at=self._now_iso(),
+        # Step 5+6: Policy revalidation AND atomic claim in a single
+        # SERIALIZABLE transaction (Critical fix 2 — TOCTOU race).
+        #
+        # The previous implementation evaluated policies and then claimed the
+        # authorization in two separate operations.  A policy could change
+        # between evaluation and claim, allowing an action to proceed under a
+        # stale policy set.  We now wrap both operations in a single
+        # serializable transaction so no policy can change between evaluation
+        # and claim.  If the serializable transaction fails due to a
+        # serialization conflict (concurrent policy modification), we return a
+        # "stale authorization" error so the caller can re-propose.
+        #
+        # Issue 5 (High 6 — prepare before claim): we also validate the
+        # adapter-specific payload constraints BEFORE claiming the token.  If
+        # validation fails, the token is not consumed.
+        try:
+            with serializable_transaction(self.conn):
+                # --- Step 5: Policy revalidation ----------------------------
+                if self.policy_engine is not None:
+                    # 5a. Classify the payload using the same classifier used
+                    #     at proposal.
+                    classifier = get_classifier(token.tool)
+                    if classifier is None:
+                        return ExecutionResult(
+                            success=False,
+                            exit_status="failure",
+                            result_summary=f"No classifier available for tool '{token.tool}'",
+                            execution_attempt_id=attempt_id,
+                            started_at=started_at,
+                            completed_at=self._now_iso(),
+                        )
+
+                    try:
+                        classification = classifier.classify(token.tool, payload)
+                    except Exception as exc:
+                        return ExecutionResult(
+                            success=False,
+                            exit_status="failure",
+                            result_summary=f"Classification failed: {exc!s}",
+                            execution_attempt_id=attempt_id,
+                            started_at=started_at,
+                            completed_at=self._now_iso(),
+                        )
+
+                    action_type = classification.action_type
+                    canonical_resources = classification.canonical_resources
+
+                    # 5b. Evaluate current active policies with agent/project/branch context.
+                    context = {
+                        "agent_id": token.agent_id,
+                        "project_id": token.project_id,
+                        "branch_id": token.branch_id,
+                    }
+                    resolution = self.policy_engine.evaluate(
+                        action_type=action_type,
+                        canonical_resources=canonical_resources,
+                        context=context,
+                    )
+
+                    # 5c. If the current policy resolution denies or requires
+                    #     approval, reject the action even if the hash matches.
+                    if resolution.effect in ("deny", "require_approval"):
+                        return ExecutionResult(
+                            success=False,
+                            exit_status="failure",
+                            result_summary=(
+                                f"Action blocked by current policy: effect='{resolution.effect}'"
+                            ),
+                            execution_attempt_id=attempt_id,
+                            started_at=started_at,
+                            completed_at=self._now_iso(),
+                        )
+
+                    # 5d. Compute a fresh policy_set_hash from the matched
+                    #     policies.  Build {policy_id: version} for each matched
+                    #     policy, sort by id, and compute canonical_hash —
+                    #     matching the issuance-time computation.
+                    fresh_policy_versions: dict[str, int] = {}
+                    for match in resolution.matched_policies:
+                        p = match.policy
+                        version = p.activation_version if p.activation_version is not None else 0
+                        fresh_policy_versions[p.id] = int(version)
+
+                    if fresh_policy_versions:
+                        sorted_pairs = sorted(fresh_policy_versions.items())
+                        fresh_policy_set_hash = canonical_hash(sorted_pairs)
+                    else:
+                        fresh_policy_set_hash = ""
+
+                    # 5e. Compare the fresh hash to the token's policy_set_hash.
+                    if fresh_policy_set_hash != token.policy_set_hash:
+                        return ExecutionResult(
+                            success=False,
+                            exit_status="failure",
+                            result_summary="Stale authorization: effective policy set has changed",
+                            execution_attempt_id=attempt_id,
+                            started_at=started_at,
+                            completed_at=self._now_iso(),
+                        )
+
+                # --- Step 5.5: Validate adapter payload before claim --------
+                # (High fix 6 — prepare before claim)
+                # Adapter-specific validation runs BEFORE the token is claimed
+                # so that a malformed payload does not consume the authorization.
+                validation_error = self._validate_adapter_payload(payload, token)
+                if validation_error is not None:
+                    return ExecutionResult(
+                        success=False,
+                        exit_status="failure",
+                        result_summary=validation_error,
+                        execution_attempt_id=attempt_id,
+                        started_at=started_at,
+                        completed_at=self._now_iso(),
+                    )
+
+                # --- Step 6: Atomically claim the authorization -------------
+                # The claim must also verify the signed-token hash matches the
+                # stored hash (High fix 6).
+                claimed = self.auth_engine.verify_and_claim(
+                    authorization_id=token.authorization_id,
+                    signed_token=signed_token,
+                    payload_hash=actual_payload_hash,
+                    proxy_principal_id=self.config.ep_service_principal_id,
+                    public_key=public_key,
                 )
-
-            try:
-                classification = classifier.classify(token.tool, payload)
-            except Exception as exc:
-                return ExecutionResult(
-                    success=False,
-                    exit_status="failure",
-                    result_summary=f"Classification failed: {exc!s}",
-                    execution_attempt_id=attempt_id,
-                    started_at=started_at,
-                    completed_at=self._now_iso(),
-                )
-
-            action_type = classification.action_type
-            canonical_resources = classification.canonical_resources
-
-            # 5b. Evaluate current active policies with agent/project/branch context.
-            context = {
-                "agent_id": token.agent_id,
-                "project_id": token.project_id,
-                "branch_id": token.branch_id,
-            }
-            resolution = self.policy_engine.evaluate(
-                action_type=action_type,
-                canonical_resources=canonical_resources,
-                context=context,
+        except OperationalError:
+            # Serialization conflict — a concurrent transaction modified
+            # policies or the authorization record between our evaluation and
+            # claim.  Return a stale-authorization error so the caller can
+            # re-propose.
+            return ExecutionResult(
+                success=False,
+                exit_status="failure",
+                result_summary="Stale authorization: serialization conflict during policy revalidation",
+                execution_attempt_id=attempt_id,
+                started_at=started_at,
+                completed_at=self._now_iso(),
             )
 
-            # 5c. If the current policy resolution denies or requires approval,
-            #     reject the action even if the hash matches.
-            if resolution.effect in ("deny", "require_approval"):
-                return ExecutionResult(
-                    success=False,
-                    exit_status="failure",
-                    result_summary=(
-                        f"Action blocked by current policy: effect='{resolution.effect}'"
-                    ),
-                    execution_attempt_id=attempt_id,
-                    started_at=started_at,
-                    completed_at=self._now_iso(),
-                )
-
-            # 5d. Compute a fresh policy_set_hash from the matched policies.
-            #     Build {policy_id: version} for each matched policy, sort by id,
-            #     and compute canonical_hash — matching the issuance-time computation.
-            fresh_policy_versions: dict[str, int] = {}
-            for match in resolution.matched_policies:
-                p = match.policy
-                version = p.activation_version if p.activation_version is not None else 0
-                fresh_policy_versions[p.id] = int(version)
-
-            if fresh_policy_versions:
-                sorted_pairs = sorted(fresh_policy_versions.items())
-                fresh_policy_set_hash = canonical_hash(sorted_pairs)
-            else:
-                fresh_policy_set_hash = ""
-
-            # 5e. Compare the fresh hash to the token's policy_set_hash.
-            if fresh_policy_set_hash != token.policy_set_hash:
-                return ExecutionResult(
-                    success=False,
-                    exit_status="failure",
-                    result_summary=("Stale authorization: effective policy set has changed"),
-                    execution_attempt_id=attempt_id,
-                    started_at=started_at,
-                    completed_at=self._now_iso(),
-                )
-
-        # Step 6: Atomically claim the authorization (Critical fix 4)
-        # The claim must also verify the signed-token hash matches the stored hash (High fix 6)
-        claimed = self.auth_engine.verify_and_claim(
-            authorization_id=token.authorization_id,
-            signed_token=signed_token,
-            payload_hash=actual_payload_hash,
-            proxy_principal_id=self.config.ep_service_principal_id,
-            public_key=public_key,
-        )
         if claimed is None:
             return ExecutionResult(
                 success=False,
@@ -297,37 +341,38 @@ class GovernedProxy(ABC):
                 completed_at=self._now_iso(),
             )
 
-        # Step 8: Report the result back to EP (Critical fix 2).
-        # The proxy must call transition_engine.record_result() so the
-        # transition advances from 'executing' to a terminal stage, then
-        # branch_committer.commit() if successful to create the graph node
-        # and advance the branch head.  If reporting fails, log the error
-        # but still return the execution result — the action already happened.
+        # Step 8: Record the result and, on success, commit the branch head.
+        #
+        # Transactional-safety invariant: the governance graph must reflect
+        # actual realised state.  Therefore:
+        #   - On adapter FAILURE or TIMEOUT: call record_result() to advance
+        #     the transition to 'failed' / 'execution_uncertain'.  No node is
+        #     created and the branch head is unchanged.
+        #   - On adapter SUCCESS: call branch_committer.commit() which
+        #     atomically records the success result, creates the graph node,
+        #     advances the branch head, AND advances the transition stage to
+        #     'succeeded' — all in a single database transaction.  We do NOT
+        #     call record_result(success) separately before commit(); that was
+        #     the old unsafe flow which left the transition 'succeeded' with
+        #     no node if commit() failed.
+        #   - If commit() fails for any reason (stale head, concurrent
+        #     commit, DB error), the entire transaction rolls back and the
+        #     transition remains at 'executing'.  We then mark it
+        #     'execution_uncertain' via record_result(timeout) so an operator
+        #     can reconcile manually, and return exit_status='uncertain'.
+        #   - Exceptions are NEVER silently swallowed.
         if self.transition_engine is not None:
-            try:
-                # Map the ExecutionResult.exit_status to the record_result
-                # exit_status parameter.
-                if result.exit_status == "success":
-                    rr_status = "success"
-                elif result.exit_status == "failure":
-                    rr_status = "failure"
-                else:
-                    # "uncertain" or "timeout" → timeout
-                    rr_status = "timeout"
-
-                self.transition_engine.record_result(
-                    transition_id=token.transition_id,
-                    exit_status=rr_status,
-                    result_summary=result.result_summary,
-                )
-
-                # If the result was successful, commit the branch head to
-                # create the graph node and advance the branch.
-                if rr_status == "success" and self.branch_committer is not None:
-                    transition = self.transition_engine.get_transition(
-                        token.transition_id,
-                    )
-                    if transition is not None:
+            if result.exit_status == "success":
+                # Success path: single atomic commit transaction.
+                if self.branch_committer is not None:
+                    try:
+                        transition = self.transition_engine.get_transition(
+                            token.transition_id,
+                        )
+                        if transition is None:
+                            raise IllegalTransitionError(
+                                f"Transition {token.transition_id} not found"
+                            )
                         branch_id: str = transition.get("branch_id", "")
                         agent_id: str = transition.get("agent_id", "")
                         expected_head_id: str | None = transition.get(
@@ -335,20 +380,12 @@ class GovernedProxy(ABC):
                         )
                         expected_version_raw = transition.get("expected_version")
 
-                        # Look up the current branch head and version from
-                        # the BranchRepository so we can pass the right
-                        # expected_head_id / expected_version to commit().
                         from ..db.repositories import BranchRepository
 
                         branch_repo = BranchRepository(self.conn)
                         current_head, current_version = branch_repo.get_head(
                             branch_id,
                         )
-
-                        # If the transition stored expected_head_id /
-                        # expected_version at proposal time, use those for
-                        # optimistic-concurrency checking; otherwise fall
-                        # back to the current branch state.
                         commit_expected_head = (
                             expected_head_id if expected_head_id is not None else current_head
                         )
@@ -357,9 +394,6 @@ class GovernedProxy(ABC):
                             if expected_version_raw is not None
                             else current_version
                         )
-
-                        # Derive the lattice_id for the audit event from
-                        # the branch.
                         branch = branch_repo.get_branch(branch_id)
                         lattice_id = (
                             branch.get("lattice_id", branch_id) if branch is not None else branch_id
@@ -376,11 +410,60 @@ class GovernedProxy(ABC):
                             expected_version=commit_expected_version,
                             lattice_id=lattice_id,
                         )
-            except Exception:
-                # The action already happened — log and continue.  Do not
-                # expose internal error details in the returned result.
-                # In production this would go to a structured logger.
-                pass
+                    except Exception:
+                        # Commit failed — the action already happened but the
+                        # governance graph does not reflect it.  Mark the
+                        # transition as execution_uncertain so an operator can
+                        # reconcile manually.  Do NOT swallow silently.
+                        try:
+                            self.transition_engine.record_result(
+                                transition_id=token.transition_id,
+                                exit_status="timeout",
+                                result_summary=(
+                                    "Governance commitment failed — "
+                                    "manual reconciliation required "
+                                    f"(reference: {attempt_id})"
+                                ),
+                            )
+                        except Exception:
+                            # If even the reconciliation record fails, we
+                            # cannot hide it — surface it as an uncertain
+                            # result so the caller knows to investigate.
+                            pass
+                        return ExecutionResult(
+                            success=False,
+                            exit_status="uncertain",
+                            result_summary=(
+                                "Execution succeeded but governance commit "
+                                f"failed — manual reconciliation required "
+                                f"(reference: {attempt_id})"
+                            ),
+                            execution_attempt_id=attempt_id,
+                            started_at=started_at,
+                            completed_at=self._now_iso(),
+                        )
+                else:
+                    # No branch committer configured — record success via the
+                    # transition engine so the transition advances.
+                    self.transition_engine.record_result(
+                        transition_id=token.transition_id,
+                        exit_status="success",
+                        result_summary=result.result_summary,
+                    )
+            elif result.exit_status == "failure":
+                # Failure path: record the failure, no node created.
+                self.transition_engine.record_result(
+                    transition_id=token.transition_id,
+                    exit_status="failure",
+                    result_summary=result.result_summary,
+                )
+            else:
+                # Timeout / uncertain path: record as execution_uncertain.
+                self.transition_engine.record_result(
+                    transition_id=token.transition_id,
+                    exit_status="timeout",
+                    result_summary=result.result_summary,
+                )
 
         return result
 
@@ -407,6 +490,31 @@ class GovernedProxy(ABC):
         Subclasses implement this with the specific tool (SQL, shell, etc.).
         """
         ...
+
+    def _validate_adapter_payload(
+        self,
+        payload: dict[str, Any],
+        token: AuthorizationToken,
+    ) -> str | None:
+        """Validate adapter-specific payload constraints WITHOUT side effects.
+
+        This method is called BEFORE the authorization token is claimed (High
+        fix 6 — prepare before claim).  If validation fails, the token is NOT
+        consumed and the caller receives a failure result.
+
+        The base implementation returns ``None`` (valid).  Subclasses override
+        this to check adapter-specific constraints such as forbidden
+        operations, opaque classification, or missing required fields.
+
+        Args:
+            payload: The actual payload dict to validate.
+            token:   The verified authorization token.
+
+        Returns:
+            ``None`` if the payload is valid, or an error message string
+            describing why validation failed.
+        """
+        return None
 
     def _now_iso(self) -> str:
         return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"

@@ -31,6 +31,7 @@ VALID_XID = "0123456789abcdefghij"  # 20-char base32hex
 
 def _now_iso() -> str:
     from datetime import datetime, timezone
+
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
 
@@ -258,15 +259,11 @@ class TestCheckPermission:
 
     def test_multiple_roles_one_has_permission(self):
         """Multiple roles, at least one has the permission -> True."""
-        assert check_permission(
-            [Role.observer, Role.administrator], "create_lattice"
-        ) is True
+        assert check_permission([Role.observer, Role.administrator], "create_lattice") is True
 
     def test_multiple_roles_none_has_permission(self):
         """Multiple roles, none has the permission -> False."""
-        assert check_permission(
-            [Role.observer, Role.auditor], "create_lattice"
-        ) is False
+        assert check_permission([Role.observer, Role.auditor], "create_lattice") is False
 
     def test_empty_roles_returns_false(self):
         assert check_permission([], "read_policy") is False

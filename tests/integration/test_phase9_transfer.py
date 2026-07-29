@@ -58,8 +58,11 @@ def conn(engine):
 def ep_service_id(conn):
     repo = PrincipalRepository(conn)
     p = repo.insert_principal(
-        principal_id=str(XID.new()), name="EP Service", type="service",
-        machine=None, description="EP service",
+        principal_id=str(XID.new()),
+        name="EP Service",
+        type="service",
+        machine=None,
+        description="EP service",
     )
     conn.commit()
     return p["id"]
@@ -91,26 +94,28 @@ def setup(conn, ep_service_id):
 
     # Create an active policy
     policy_repo = PolicyRepository(conn)
-    policy_repo.insert_policy({
-        "id": str(XID.new()),
-        "effect": "deny",
-        "actions": ["db.drop"],
-        "resources": ["postgres://**"],
-        "conditions": {},
-        "priority": 100,
-        "scope": "global",
-        "agent_scope": None,
-        "description": "Deny drop",
-        "status": "active",
-        "created_by": ep_service_id,
-        "approved_by": ep_service_id,
-        "approved_at": "2026-07-28T12:00:00.000000Z",
-        "activation_version": 1,
-        "exception_to": [],
-        "valid_from": None,
-        "valid_until": None,
-        "justification": None,
-    })
+    policy_repo.insert_policy(
+        {
+            "id": str(XID.new()),
+            "effect": "deny",
+            "actions": ["db.drop"],
+            "resources": ["postgres://**"],
+            "conditions": {},
+            "priority": 100,
+            "scope": "global",
+            "agent_scope": None,
+            "description": "Deny drop",
+            "status": "active",
+            "created_by": ep_service_id,
+            "approved_by": ep_service_id,
+            "approved_at": "2026-07-28T12:00:00.000000Z",
+            "activation_version": 1,
+            "exception_to": [],
+            "valid_from": None,
+            "valid_until": None,
+            "justification": None,
+        }
+    )
     conn.commit()
 
     return {
@@ -210,7 +215,9 @@ class TestImport:
         conn.commit()
 
         importer = TransferImporter(conn)
-        result = importer.import_as_fork(package, "Forked Project", ep_service_principal_id=setup["ep_service_id"])
+        result = importer.import_as_fork(
+            package, "Forked Project", ep_service_principal_id=setup["ep_service_id"]
+        )
         conn.commit()
 
         assert result["project_id"] != setup["project"]["id"]
@@ -226,7 +233,9 @@ class TestImport:
         conn.commit()
 
         importer = TransferImporter(conn)
-        result = importer.import_as_fork(package, "Forked Project", ep_service_principal_id=setup["ep_service_id"])
+        result = importer.import_as_fork(
+            package, "Forked Project", ep_service_principal_id=setup["ep_service_id"]
+        )
         conn.commit()
 
         # ID mappings should be non-empty
@@ -245,7 +254,9 @@ class TestImport:
         conn.commit()
 
         importer = TransferImporter(conn)
-        importer.import_as_fork(package, "Forked Project", ep_service_principal_id=setup["ep_service_id"])
+        importer.import_as_fork(
+            package, "Forked Project", ep_service_principal_id=setup["ep_service_id"]
+        )
         conn.commit()
 
         # Check import mappings exist
@@ -264,7 +275,8 @@ class TestImport:
 
         importer = TransferImporter(conn)
         result = importer.import_as_fork(
-            package, "Forked Project",
+            package,
+            "Forked Project",
             trusted_signer=False,
             trusted_source=False,
             ep_service_principal_id=setup["ep_service_id"],
@@ -285,7 +297,8 @@ class TestImport:
 
         importer = TransferImporter(conn)
         result = importer.import_as_fork(
-            package, "Forked Project",
+            package,
+            "Forked Project",
             trusted_signer=True,
             trusted_source=True,
             ep_service_principal_id=setup["ep_service_id"],
@@ -308,7 +321,9 @@ class TestImport:
 
         importer = TransferImporter(conn)
         with pytest.raises(TransferImportError):
-            importer.import_as_fork(package, "Forked", ep_service_principal_id=setup["ep_service_id"])
+            importer.import_as_fork(
+                package, "Forked", ep_service_principal_id=setup["ep_service_id"]
+            )
         conn.rollback()
 
     def test_prohibited_imports_rejected(self, conn, setup):
@@ -323,11 +338,15 @@ class TestImport:
         # Add a prohibited item
         package.lattice_state["active_authorization_tokens"] = [{"token": "secret"}]
         # Fix the content hash so the check passes to the prohibited check
-        package.content_hash = __import__("ep_governance.canonical", fromlist=["canonical_hash"]).canonical_hash(package.lattice_state)
+        package.content_hash = __import__(
+            "ep_governance.canonical", fromlist=["canonical_hash"]
+        ).canonical_hash(package.lattice_state)
 
         importer = TransferImporter(conn)
         with pytest.raises(TransferImportError, match="Prohibited"):
-            importer.import_as_fork(package, "Forked", ep_service_principal_id=setup["ep_service_id"])
+            importer.import_as_fork(
+                package, "Forked", ep_service_principal_id=setup["ep_service_id"]
+            )
         conn.rollback()
 
 

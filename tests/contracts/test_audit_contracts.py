@@ -36,10 +36,17 @@ REQUIRED_AUDIT_EVENT_FIELDS = [
 # v1.1 had a simpler hash: SHA-256(event_data || previous_hash)
 # v1.1.1 corrected: hash covers the full canonical envelope
 V11_INCORRECT_HASH_FIELDS = frozenset({"event_data", "previous_hash"})
-V111_CORRECT_HASH_FIELDS = frozenset({
-    "sequence", "event_id", "event_type", "event_data",
-    "principal_id", "created_at", "previous_hash",
-})
+V111_CORRECT_HASH_FIELDS = frozenset(
+    {
+        "sequence",
+        "event_id",
+        "event_type",
+        "event_data",
+        "principal_id",
+        "created_at",
+        "previous_hash",
+    }
+)
 
 GENESIS_HASH = "0" * 64
 
@@ -49,9 +56,17 @@ class TestAuditEventEnvelope:
 
     def test_all_required_fields_present(self):
         assert set(REQUIRED_AUDIT_EVENT_FIELDS) == {
-            "id", "lattice_id", "sequence", "event_type", "event_data",
-            "previous_hash", "event_hash", "actor_principal_id",
-            "authenticated_caller_id", "event_writer_id", "created_at",
+            "id",
+            "lattice_id",
+            "sequence",
+            "event_type",
+            "event_data",
+            "previous_hash",
+            "event_hash",
+            "actor_principal_id",
+            "authenticated_caller_id",
+            "event_writer_id",
+            "created_at",
         }
 
     def test_v11_hash_formula_is_incomplete(self):
@@ -170,7 +185,7 @@ class TestHashChainIntegrity:
         for i in range(3):
             envelope = {
                 "sequence": i + 1,
-                "event_id": f"cjvbbzh6qgtnoxiaa00{i+1}",
+                "event_id": f"cjvbbzh6qgtnoxiaa00{i + 1}",
                 "event_type": "test_event",
                 "event_data": {"index": i},
                 "principal_id": "cjvbbzh6qgtnoxiaa004",
@@ -179,18 +194,18 @@ class TestHashChainIntegrity:
             }
             canonical = json.dumps(envelope, sort_keys=True, separators=(",", ":"))
             event_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-            events.append({
-                "envelope": envelope,
-                "event_hash": event_hash,
-                "previous_hash": prev,
-            })
+            events.append(
+                {
+                    "envelope": envelope,
+                    "event_hash": event_hash,
+                    "previous_hash": prev,
+                }
+            )
             prev = event_hash
 
         # Verify chain
         for i, event in enumerate(events):
-            canonical = json.dumps(
-                event["envelope"], sort_keys=True, separators=(",", ":")
-            )
+            canonical = json.dumps(event["envelope"], sort_keys=True, separators=(",", ":"))
             recomputed = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
             assert recomputed == event["event_hash"]
             if i > 0:

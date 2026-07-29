@@ -39,6 +39,7 @@ from ep_governance.xid import XID
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 def _get_db_url() -> str:
     return os.environ.get(
         "EP_TEST_DB_URL",
@@ -88,15 +89,17 @@ class TestMigrations:
     def test_migrations_create_all_tables(self, conn):
         """All required tables must exist after migration."""
         if is_sqlite(conn):
-            result = conn.execute(sa.text(
-                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-            ))
+            result = conn.execute(
+                sa.text("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+            )
             tables = {row[0] for row in result}
         else:
-            result = conn.execute(sa.text(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema='public' ORDER BY table_name"
-            ))
+            result = conn.execute(
+                sa.text(
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema='public' ORDER BY table_name"
+                )
+            )
             tables = {row[0] for row in result}
 
         required = {
@@ -250,32 +253,37 @@ class TestPolicyRepository:
     def test_insert_and_get_policy(self, conn):
         principal_repo = PrincipalRepository(conn)
         principal = principal_repo.insert_principal(
-            principal_id=str(XID.new()), name="Test", type="human",
-            machine=None, description="",
+            principal_id=str(XID.new()),
+            name="Test",
+            type="human",
+            machine=None,
+            description="",
         )
         conn.commit()
 
         repo = PolicyRepository(conn)
-        policy = repo.insert_policy({
-            "id": str(XID.new()),
-            "effect": "deny",
-            "actions": ["db.drop"],
-            "resources": ["postgres://cloudhub/gbrain_pilot/**"],
-            "conditions": {},
-            "priority": 100,
-            "scope": "global",
-            "agent_scope": None,
-            "description": "Test policy",
-            "status": "active",
-            "created_by": principal["id"],
-            "approved_by": None,
-            "approved_at": None,
-            "activation_version": None,
-            "exception_to": [],
-            "valid_from": None,
-            "valid_until": None,
-            "justification": None,
-        })
+        policy = repo.insert_policy(
+            {
+                "id": str(XID.new()),
+                "effect": "deny",
+                "actions": ["db.drop"],
+                "resources": ["postgres://cloudhub/gbrain_pilot/**"],
+                "conditions": {},
+                "priority": 100,
+                "scope": "global",
+                "agent_scope": None,
+                "description": "Test policy",
+                "status": "active",
+                "created_by": principal["id"],
+                "approved_by": None,
+                "approved_at": None,
+                "activation_version": None,
+                "exception_to": [],
+                "valid_from": None,
+                "valid_until": None,
+                "justification": None,
+            }
+        )
         conn.commit()
         fetched = repo.get_policy(policy["id"])
         assert fetched is not None
@@ -284,32 +292,59 @@ class TestPolicyRepository:
     def test_list_active_policies(self, conn):
         principal_repo = PrincipalRepository(conn)
         principal = principal_repo.insert_principal(
-            principal_id=str(XID.new()), name="Test", type="human",
-            machine=None, description="",
+            principal_id=str(XID.new()),
+            name="Test",
+            type="human",
+            machine=None,
+            description="",
         )
         conn.commit()
 
         repo = PolicyRepository(conn)
-        repo.insert_policy({
-            "id": str(XID.new()), "effect": "deny", "actions": ["db.drop"],
-            "resources": ["postgres://**"], "conditions": {},
-            "priority": 100, "scope": "global", "agent_scope": None,
-            "description": "Active", "status": "active",
-            "created_by": principal["id"], "approved_by": None,
-            "approved_at": None, "activation_version": None,
-            "exception_to": [], "valid_from": None, "valid_until": None,
-            "justification": None,
-        })
-        repo.insert_policy({
-            "id": str(XID.new()), "effect": "allow", "actions": ["db.select"],
-            "resources": ["postgres://**"], "conditions": {},
-            "priority": 50, "scope": "global", "agent_scope": None,
-            "description": "Draft", "status": "draft",
-            "created_by": principal["id"], "approved_by": None,
-            "approved_at": None, "activation_version": None,
-            "exception_to": [], "valid_from": None, "valid_until": None,
-            "justification": None,
-        })
+        repo.insert_policy(
+            {
+                "id": str(XID.new()),
+                "effect": "deny",
+                "actions": ["db.drop"],
+                "resources": ["postgres://**"],
+                "conditions": {},
+                "priority": 100,
+                "scope": "global",
+                "agent_scope": None,
+                "description": "Active",
+                "status": "active",
+                "created_by": principal["id"],
+                "approved_by": None,
+                "approved_at": None,
+                "activation_version": None,
+                "exception_to": [],
+                "valid_from": None,
+                "valid_until": None,
+                "justification": None,
+            }
+        )
+        repo.insert_policy(
+            {
+                "id": str(XID.new()),
+                "effect": "allow",
+                "actions": ["db.select"],
+                "resources": ["postgres://**"],
+                "conditions": {},
+                "priority": 50,
+                "scope": "global",
+                "agent_scope": None,
+                "description": "Draft",
+                "status": "draft",
+                "created_by": principal["id"],
+                "approved_by": None,
+                "approved_at": None,
+                "activation_version": None,
+                "exception_to": [],
+                "valid_from": None,
+                "valid_until": None,
+                "justification": None,
+            }
+        )
         conn.commit()
         active = repo.list_active_policies()
         assert len(active) == 1
@@ -332,8 +367,12 @@ class TestAuditWriter:
         conn.commit()
 
         # Initialize audit head for the lattice
-        conn.execute(sa.text("INSERT INTO ep_audit_heads (lattice_id, last_sequence, last_hash) VALUES (:lid, 0, :hash)"),
-                     {"lid": lattice["id"], "hash": "0" * 64})
+        conn.execute(
+            sa.text(
+                "INSERT INTO ep_audit_heads (lattice_id, last_sequence, last_hash) VALUES (:lid, 0, :hash)"
+            ),
+            {"lid": lattice["id"], "hash": "0" * 64},
+        )
         conn.commit()
 
         writer = AuditWriter(conn, ep_service_principal_id)
@@ -360,8 +399,12 @@ class TestAuditWriter:
         conn.commit()
 
         # Initialize audit head for the lattice
-        conn.execute(sa.text("INSERT INTO ep_audit_heads (lattice_id, last_sequence, last_hash) VALUES (:lid, 0, :hash)"),
-                     {"lid": lattice["id"], "hash": "0" * 64})
+        conn.execute(
+            sa.text(
+                "INSERT INTO ep_audit_heads (lattice_id, last_sequence, last_hash) VALUES (:lid, 0, :hash)"
+            ),
+            {"lid": lattice["id"], "hash": "0" * 64},
+        )
         conn.commit()
 
         writer = AuditWriter(conn, ep_service_principal_id)
@@ -394,8 +437,12 @@ class TestAuditVerifier:
         conn.commit()
 
         # Initialize audit head for the lattice
-        conn.execute(sa.text("INSERT INTO ep_audit_heads (lattice_id, last_sequence, last_hash) VALUES (:lid, 0, :hash)"),
-                     {"lid": lattice["id"], "hash": "0" * 64})
+        conn.execute(
+            sa.text(
+                "INSERT INTO ep_audit_heads (lattice_id, last_sequence, last_hash) VALUES (:lid, 0, :hash)"
+            ),
+            {"lid": lattice["id"], "hash": "0" * 64},
+        )
         conn.commit()
 
         writer = AuditWriter(conn, ep_service_principal_id)
@@ -427,30 +474,35 @@ def _create_test_setup(conn):
     """Create project, lattice, branch, principal, and transition for FK tests."""
     proj_repo = ProjectRepository(conn)
     project = proj_repo.create_project("Test", "")
-    
+
     lat_repo = LatticeRepository(conn)
     lattice = lat_repo.create_lattice(project["id"], "main")
-    
+
     branch_repo = BranchRepository(conn)
     branch = branch_repo.create_branch(lattice["id"], "main")
-    
+
     principal_repo = PrincipalRepository(conn)
     agent = principal_repo.insert_principal(
-        principal_id=str(XID.new()), name="Agent", type="agent",
-        machine="localhost", description="Test agent",
+        principal_id=str(XID.new()),
+        name="Agent",
+        type="agent",
+        machine="localhost",
+        description="Test agent",
     )
-    
+
     # Create a transition for the FK
     transition_repo = TransitionRepository(conn)
-    transition = transition_repo.insert_transition({
-        "id": str(XID.new()),
-        "agent_id": agent["id"],
-        "branch_id": branch["id"],
-        "tool": "postgres.execute",
-        "payload_hash": "sha256:" + "a" * 64,
-        "idempotency_key": str(XID.new()),
-        "stage": "authorized",
-    })
+    transition = transition_repo.insert_transition(
+        {
+            "id": str(XID.new()),
+            "agent_id": agent["id"],
+            "branch_id": branch["id"],
+            "tool": "postgres.execute",
+            "payload_hash": "sha256:" + "a" * 64,
+            "idempotency_key": str(XID.new()),
+            "stage": "authorized",
+        }
+    )
     conn.commit()
     return {
         "project": project,
@@ -468,20 +520,22 @@ class TestAuthorizationClaim:
 
         auth_repo = AuthorizationRepository(conn)
         auth_id = str(XID.new())
-        auth_repo.insert_authorization({
-            "id": auth_id,
-            "transition_id": setup["transition"]["id"],
-            "token_hash": "sha256:fakehash",
-            "payload_hash": "sha256:" + "a" * 64,
-            "policy_set_hash": "sha256:" + "b" * 64,
-            "matched_policy_versions": {},
-            "proxy_audience": "postgres-proxy",
-            "agent_id": setup["agent"]["id"],
-            "project_id": setup["project"]["id"],
-            "branch_id": setup["branch"]["id"],
-            "issued_at": datetime.now(timezone.utc).isoformat(),
-            "expires_at": "2099-01-01T00:00:00.000000Z",
-        })
+        auth_repo.insert_authorization(
+            {
+                "id": auth_id,
+                "transition_id": setup["transition"]["id"],
+                "token_hash": "sha256:fakehash",
+                "payload_hash": "sha256:" + "a" * 64,
+                "policy_set_hash": "sha256:" + "b" * 64,
+                "matched_policy_versions": {},
+                "proxy_audience": "postgres-proxy",
+                "agent_id": setup["agent"]["id"],
+                "project_id": setup["project"]["id"],
+                "branch_id": setup["branch"]["id"],
+                "issued_at": datetime.now(timezone.utc).isoformat(),
+                "expires_at": "2099-01-01T00:00:00.000000Z",
+            }
+        )
         conn.commit()
 
         # Claim it
@@ -495,20 +549,22 @@ class TestAuthorizationClaim:
 
         auth_repo = AuthorizationRepository(conn)
         auth_id = str(XID.new())
-        auth_repo.insert_authorization({
-            "id": auth_id,
-            "transition_id": setup["transition"]["id"],
-            "token_hash": "sha256:fakehash",
-            "payload_hash": "sha256:" + "a" * 64,
-            "policy_set_hash": "sha256:" + "b" * 64,
-            "matched_policy_versions": {},
-            "proxy_audience": "postgres-proxy",
-            "agent_id": setup["agent"]["id"],
-            "project_id": setup["project"]["id"],
-            "branch_id": setup["branch"]["id"],
-            "issued_at": datetime.now(timezone.utc).isoformat(),
-            "expires_at": "2099-01-01T00:00:00.000000Z",
-        })
+        auth_repo.insert_authorization(
+            {
+                "id": auth_id,
+                "transition_id": setup["transition"]["id"],
+                "token_hash": "sha256:fakehash",
+                "payload_hash": "sha256:" + "a" * 64,
+                "policy_set_hash": "sha256:" + "b" * 64,
+                "matched_policy_versions": {},
+                "proxy_audience": "postgres-proxy",
+                "agent_id": setup["agent"]["id"],
+                "project_id": setup["project"]["id"],
+                "branch_id": setup["branch"]["id"],
+                "issued_at": datetime.now(timezone.utc).isoformat(),
+                "expires_at": "2099-01-01T00:00:00.000000Z",
+            }
+        )
         conn.commit()
 
         # First claim succeeds

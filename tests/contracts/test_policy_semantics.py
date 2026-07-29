@@ -27,14 +27,16 @@ EFFECT_PRECEDENCE = {
 }
 
 # Policy lifecycle statuses (v1.1.1 section 6)
-POLICY_LIFECYCLE = frozenset({
-    "draft",
-    "pending_approval",
-    "active",
-    "rejected",
-    "superseded",
-    "retired",
-})
+POLICY_LIFECYCLE = frozenset(
+    {
+        "draft",
+        "pending_approval",
+        "active",
+        "rejected",
+        "superseded",
+        "retired",
+    }
+)
 
 # Policies with these statuses have NO enforcement effect
 NON_ENFORCING_STATUSES = POLICY_LIFECYCLE - {"active"}
@@ -67,15 +69,21 @@ class TestPolicyLifecycle:
 
     def test_lifecycle_statuses_match_specification(self):
         assert POLICY_LIFECYCLE == {
-            "draft", "pending_approval", "active",
-            "rejected", "superseded", "retired",
+            "draft",
+            "pending_approval",
+            "active",
+            "rejected",
+            "superseded",
+            "retired",
         }
 
     def test_only_active_has_enforcement_effect(self):
         """EP-POLICY-002: a policy has NO enforcement effect unless status=active."""
         assert "active" not in NON_ENFORCING_STATUSES
-        assert all(s in NON_ENFORCING_STATUSES for s in
-                   {"draft", "pending_approval", "rejected", "superseded", "retired"})
+        assert all(
+            s in NON_ENFORCING_STATUSES
+            for s in {"draft", "pending_approval", "rejected", "superseded", "retired"}
+        )
 
     def test_draft_has_no_enforcement_effect(self):
         assert "draft" in NON_ENFORCING_STATUSES
@@ -131,11 +139,11 @@ class TestPolicyOverride:
     """EP-POLICY-009: allow overrides deny only with full controls."""
 
     OVERRIDE_REQUIRED_FIELDS = [
-        "exception_to",      # Must explicitly list the deny policy XID
-        "narrower_scope",    # Must be more narrowly scoped
-        "valid_until",       # Must be time-limited
-        "justification",     # Must have non-empty justification
-        "approved_authority", # Must be approved at required authority level
+        "exception_to",  # Must explicitly list the deny policy XID
+        "narrower_scope",  # Must be more narrowly scoped
+        "valid_until",  # Must be time-limited
+        "justification",  # Must have non-empty justification
+        "approved_authority",  # Must be approved at required authority level
     ]
 
     def test_override_requires_exception_to(self):
