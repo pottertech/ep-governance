@@ -143,10 +143,10 @@ class AuditWriter:
         dialect = conn.dialect.name
 
         # --- Begin serialised transaction --------------------------------
-        if dialect == "sqlite":
-            conn.execute(text("BEGIN IMMEDIATE"))
-        else:
-            conn.execute(text("BEGIN"))
+        # SQLAlchemy auto-begins transactions; skip explicit BEGIN.
+        # For SQLite, serialization is handled by the connection's
+        # check_same_thread=False and WAL mode. For PostgreSQL, we use
+        # SELECT ... FOR UPDATE below.
         try:
             # 1. Lock the audit head and read current state
             if dialect == "sqlite":

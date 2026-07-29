@@ -236,7 +236,10 @@ CREATE TABLE ep_approval_requests (
                      CHECK (status IN ('pending', 'approved', 'denied', 'expired')),
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     decided_at    TEXT,
-    decided_by    TEXT REFERENCES ep_principals(id)
+    decided_by    TEXT REFERENCES ep_principals(id),
+    decision      TEXT,
+    reason        TEXT,
+    updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE TABLE ep_approval_decisions (
