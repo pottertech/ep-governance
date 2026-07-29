@@ -183,10 +183,10 @@ class GovernedProxy(ABC):
         # adapter-specific payload constraints BEFORE claiming the token.  If
         # validation fails, the token is not consumed.
         #
-        # Issue High 6: serializable_transaction() now requires a clean
-        # connection (it no longer silently commits pending autobegun work).
-        # Commit any pending reads from token verification above so the
-        # connection is clean before we begin the serializable transaction.
+        # Issue High 6: serializable_transaction() requires a clean connection.
+        # The reads above (token verification, authorization lookup) may have
+        # autobegun a transaction. Commit those read-only operations to clean
+        # the connection. This is safe because the reads are non-mutating.
         if self.conn.in_transaction():
             self.conn.commit()
         try:

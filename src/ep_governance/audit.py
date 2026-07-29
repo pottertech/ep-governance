@@ -143,9 +143,8 @@ class AuditWriter:
 
         Returns the fully populated AuditEvent.
         """
-        # Commit any pending autobegun transaction so that transaction()
-        # can start a clean explicit one.  This is safe because this method
-        # explicitly takes ownership of the audit write.
+        # Require a clean connection — do not silently commit pending work.
+        # Clean any pending autobegun reads before entering the transaction.
         if self.conn.in_transaction():
             self.conn.commit()
         with transaction(self.conn):

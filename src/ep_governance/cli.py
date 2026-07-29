@@ -601,6 +601,9 @@ def approve(
         if req is None:
             _error(f"Approval request {approval_id} not found", json)
             raise typer.Exit(1)
+        # Commit any pending reads so TransitionEngine.approve receives a clean
+        # connection (it opens its own transaction — Issue Critical 2 / High 6).
+        conn.commit()
         trans_engine = TransitionEngine(conn, ep_id)
         result = trans_engine.approve(
             transition_id=req["transition_id"],
@@ -639,6 +642,9 @@ def deny(
         if req is None:
             _error(f"Approval request {approval_id} not found", json)
             raise typer.Exit(1)
+        # Commit any pending reads so TransitionEngine.deny_approval receives a
+        # clean connection (it opens its own transaction — Issue Critical 2 / High 6).
+        conn.commit()
         trans_engine = TransitionEngine(conn, ep_id)
         result = trans_engine.deny_approval(
             transition_id=req["transition_id"],

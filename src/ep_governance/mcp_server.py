@@ -783,6 +783,9 @@ def _ep_approve(
     req = approval_repo.get_request(args["approval_id"])
     if req is None:
         return {"error": "Approval request not found"}
+    # Commit any pending reads so TransitionEngine.approve receives a clean
+    # connection (it opens its own transaction — Issue Critical 2 / High 6).
+    conn.commit()
     engine = TransitionEngine(conn, ep_id)
     # Separation-of-duties (approver != requester) is enforced by
     # TransitionEngine.approve; the approver_id here is the authenticated
@@ -816,6 +819,9 @@ def _ep_deny(
     req = approval_repo.get_request(args["approval_id"])
     if req is None:
         return {"error": "Approval request not found"}
+    # Commit any pending reads so TransitionEngine.deny_approval receives a
+    # clean connection (it opens its own transaction — Issue Critical 2 / High 6).
+    conn.commit()
     engine = TransitionEngine(conn, ep_id)
     result = engine.deny_approval(
         transition_id=req["transition_id"],

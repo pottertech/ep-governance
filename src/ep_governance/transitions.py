@@ -16,7 +16,6 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
-import sys
 from typing import TYPE_CHECKING, Any
 
 from .audit import AuditWriter
@@ -37,6 +36,7 @@ from .db.repositories import (
 )
 from .db.transactions import transaction
 from .errors import (
+    ApprovalAlreadyDecidedError,
     IllegalTransitionError,
     SeparationOfDutiesError,
 )
@@ -430,63 +430,83 @@ class TransitionEngine:
             IllegalTransitionError:  If the transition is not in ``pending_approval``.
             SeparationOfDutiesError: If the approver is the same as the requester,
                                      or if an agent attempts to approve.
+            ApprovalAlreadyDecidedError: If the approval request was already
+                                          decided by another approver (race).
         """
-        transition = self.transition_repo.get_transition(transition_id)
-        if transition is None:
-            raise IllegalTransitionError(f"Transition '{transition_id}' not found")
+        # All operations (read transition, decide approval request, advance
+        # stage, write audit event) must run in a single transaction so that a
+        # failure in any step rolls back the entire state change atomically
+        # (Issue Critical 2).  transaction() requires a clean connection, so
+        # commit any pending autobegun reads first (Issue High 6).
+        if self.conn.in_transaction():
+            self.conn.commit()
+        with transaction(self.conn):
+            transition = self.transition_repo.get_transition(transition_id)
+            if transition is None:
+                raise IllegalTransitionError(f"Transition '{transition_id}' not found")
 
-        current_stage = transition.get("stage", "")
-        if current_stage != "pending_approval":
-            raise IllegalTransitionError(
-                f"Cannot approve transition in stage '{current_stage}'; must be 'pending_approval'"
+            current_stage = transition.get("stage", "")
+            if current_stage != "pending_approval":
+                raise IllegalTransitionError(
+                    f"Cannot approve transition in stage '{current_stage}'; must be 'pending_approval'"
+                )
+
+            # Separation of duties: requester cannot approve their own action
+            agent_id: str = transition.get("agent_id", "")
+            if approver_id == agent_id:
+                raise SeparationOfDutiesError("The requester cannot approve their own action")
+
+            # Sensitive operations require a human approver
+            if approver_type == "agent":
+                raise SeparationOfDutiesError(
+                    "Sensitive operations require a human approver; agents cannot approve transitions"
+                )
+
+            branch_id: str = transition.get("branch_id", "")
+
+            # Decide the EXISTING pending approval request for this transition.
+            # The request was created during propose(); we must NOT create a new
+            # one — that would leave the original pending forever while a new
+            # request gets decided (Issue Critical 2).
+            approval = self.approval_repo.find_pending_by_transition(transition_id)
+            if approval is None:
+                raise IllegalTransitionError(
+                    f"No pending approval request found for transition '{transition_id}'"
+                )
+            # decide() returns None when its `WHERE status = 'pending'` guard
+            # fails — i.e. a concurrent approver already decided this request
+            # (Issue Critical 3).  Detect the race and abort atomically; the
+            # surrounding transaction rolls back any partial work.
+            decided = self.approval_repo.decide(
+                request_id=approval["id"],
+                decided_by=approver_id,
+                decision="approved",
+                reason=reason,
+            )
+            if decided is None:
+                raise ApprovalAlreadyDecidedError(
+                    f"Approval request '{approval['id']}' for transition "
+                    f"'{transition_id}' was already decided by another approver"
+                )
+
+            # Advance transition to authorized
+            transition = self.advance_stage(transition_id, "authorized")
+
+            self._write_audit_event(
+                transition_id=transition_id,
+                branch_id=branch_id,
+                event_type="transition.approved",
+                actor_principal_id=approver_id,
+                event_data={
+                    "transition_id": transition_id,
+                    "approver_id": approver_id,
+                    "approver_type": approver_type,
+                    "reason": reason,
+                },
+                in_transaction=True,
             )
 
-        # Separation of duties: requester cannot approve their own action
-        agent_id: str = transition.get("agent_id", "")
-        if approver_id == agent_id:
-            raise SeparationOfDutiesError("The requester cannot approve their own action")
-
-        # Sensitive operations require a human approver
-        if approver_type == "agent":
-            raise SeparationOfDutiesError(
-                "Sensitive operations require a human approver; agents cannot approve transitions"
-            )
-
-        branch_id: str = transition.get("branch_id", "")
-
-        # Decide the EXISTING pending approval request for this transition.
-        # The request was created during propose(); we must NOT create a new
-        # one — that would leave the original pending forever while a new
-        # request gets decided (Issue Critical 2).
-        approval = self.approval_repo.find_pending_by_transition(transition_id)
-        if approval is None:
-            raise IllegalTransitionError(
-                f"No pending approval request found for transition '{transition_id}'"
-            )
-        self.approval_repo.decide(
-            request_id=approval["id"],
-            decided_by=approver_id,
-            decision="approved",
-            reason=reason,
-        )
-
-        # Advance transition to authorized
-        transition = self.advance_stage(transition_id, "authorized")
-
-        self._write_audit_event(
-            transition_id=transition_id,
-            branch_id=branch_id,
-            event_type="transition.approved",
-            actor_principal_id=approver_id,
-            event_data={
-                "transition_id": transition_id,
-                "approver_id": approver_id,
-                "approver_type": approver_type,
-                "reason": reason,
-            },
-        )
-
-        return transition
+            return transition
 
     # ------------------------------------------------------------------ #
     # Deny approval
@@ -511,56 +531,76 @@ class TransitionEngine:
         Raises:
             IllegalTransitionError:  If the transition is not in ``pending_approval``.
             SeparationOfDutiesError: If the approver is the same as the requester.
+            ApprovalAlreadyDecidedError: If the approval request was already
+                                          decided by another approver (race).
         """
-        transition = self.transition_repo.get_transition(transition_id)
-        if transition is None:
-            raise IllegalTransitionError(f"Transition '{transition_id}' not found")
+        # All operations (read transition, decide approval request, advance
+        # stage, write audit event) must run in a single transaction so that a
+        # failure in any step rolls back the entire state change atomically
+        # (Issue Critical 2).  transaction() requires a clean connection, so
+        # commit any pending autobegun reads first (Issue High 6).
+        if self.conn.in_transaction():
+            self.conn.commit()
+        with transaction(self.conn):
+            transition = self.transition_repo.get_transition(transition_id)
+            if transition is None:
+                raise IllegalTransitionError(f"Transition '{transition_id}' not found")
 
-        current_stage = transition.get("stage", "")
-        if current_stage != "pending_approval":
-            raise IllegalTransitionError(
-                f"Cannot deny transition in stage '{current_stage}'; must be 'pending_approval'"
+            current_stage = transition.get("stage", "")
+            if current_stage != "pending_approval":
+                raise IllegalTransitionError(
+                    f"Cannot deny transition in stage '{current_stage}'; must be 'pending_approval'"
+                )
+
+            # Separation of duties
+            agent_id: str = transition.get("agent_id", "")
+            if approver_id == agent_id:
+                raise SeparationOfDutiesError("The requester cannot deny their own action")
+
+            branch_id: str = transition.get("branch_id", "")
+
+            # Decide the EXISTING pending approval request for this transition.
+            # The request was created during propose(); we must NOT create a new
+            # one — that would leave the original pending forever while a new
+            # request gets decided (Issue Critical 2).
+            approval = self.approval_repo.find_pending_by_transition(transition_id)
+            if approval is None:
+                raise IllegalTransitionError(
+                    f"No pending approval request found for transition '{transition_id}'"
+                )
+            # decide() returns None when its `WHERE status = 'pending'` guard
+            # fails — i.e. a concurrent approver already decided this request
+            # (Issue Critical 3).  Detect the race and abort atomically; the
+            # surrounding transaction rolls back any partial work.
+            decided = self.approval_repo.decide(
+                request_id=approval["id"],
+                decided_by=approver_id,
+                decision="denied",
+                reason=reason,
+            )
+            if decided is None:
+                raise ApprovalAlreadyDecidedError(
+                    f"Approval request '{approval['id']}' for transition "
+                    f"'{transition_id}' was already decided by another approver"
+                )
+
+            # Advance transition to denied
+            transition = self.advance_stage(transition_id, "denied")
+
+            self._write_audit_event(
+                transition_id=transition_id,
+                branch_id=branch_id,
+                event_type="transition.denied_approval",
+                actor_principal_id=approver_id,
+                event_data={
+                    "transition_id": transition_id,
+                    "approver_id": approver_id,
+                    "reason": reason,
+                },
+                in_transaction=True,
             )
 
-        # Separation of duties
-        agent_id: str = transition.get("agent_id", "")
-        if approver_id == agent_id:
-            raise SeparationOfDutiesError("The requester cannot deny their own action")
-
-        branch_id: str = transition.get("branch_id", "")
-
-        # Decide the EXISTING pending approval request for this transition.
-        # The request was created during propose(); we must NOT create a new
-        # one — that would leave the original pending forever while a new
-        # request gets decided (Issue Critical 2).
-        approval = self.approval_repo.find_pending_by_transition(transition_id)
-        if approval is None:
-            raise IllegalTransitionError(
-                f"No pending approval request found for transition '{transition_id}'"
-            )
-        self.approval_repo.decide(
-            request_id=approval["id"],
-            decided_by=approver_id,
-            decision="denied",
-            reason=reason,
-        )
-
-        # Advance transition to denied
-        transition = self.advance_stage(transition_id, "denied")
-
-        self._write_audit_event(
-            transition_id=transition_id,
-            branch_id=branch_id,
-            event_type="transition.denied_approval",
-            actor_principal_id=approver_id,
-            event_data={
-                "transition_id": transition_id,
-                "approver_id": approver_id,
-                "reason": reason,
-            },
-        )
-
-        return transition
+            return transition
 
     # ------------------------------------------------------------------ #
     # Cancel
@@ -852,6 +892,9 @@ class TransitionEngine:
             # commitment (node creation + head advancement) the same way
             # the proxy does.  If it fails, revert to execution_uncertain.
             if branch_committer is not None:
+                # The transition is in 'execution_uncertain'. BranchCommitter.commit()
+                # will be called and it needs to advance the stage to 'succeeded'.
+                # We pass the current stage so commit() knows it's a reconciliation.
                 # Resolve branch context parameters from the transition /
                 # branch state, falling back to caller-supplied values.
                 commit_description = (
@@ -939,15 +982,14 @@ class TransitionEngine:
                         f"successful reconcile commit"
                     )
             else:
-                # No branch committer — advance stage only, log a warning
-                # that no node was created.
-                print(
-                    f"[EP-Governance WARNING] reconcile() advanced transition "
-                    f"{transition_id} to 'succeeded' without branch commitment "
-                    f"— no graph node was created (branch_committer not provided)",
-                    file=sys.stderr,
+                # No branch committer — successful reconciliation requires
+                # atomic branch commitment. Do NOT advance to succeeded
+                # without creating a node and advancing the branch head.
+                raise IllegalTransitionError(
+                    f"Successful reconciliation of transition '{transition_id}' "
+                    f"requires a branch_committer for atomic graph commitment. "
+                    f"Cannot advance to 'succeeded' without creating a node."
                 )
-                transition = self.advance_stage(transition_id, "succeeded")
         elif final_status == "failed":
             transition = self.advance_stage(transition_id, "failed")
         else:

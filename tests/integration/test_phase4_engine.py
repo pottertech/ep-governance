@@ -599,7 +599,10 @@ class TestExecutionResults:
             assert result["stage"] == "execution_uncertain"
 
     def test_reconcile_from_uncertain_to_succeeded(self, conn, ep_service_id, agent_id, setup):
+        from ep_governance.branches import BranchCommitter
+
         engine = TransitionEngine(conn, ep_service_id)
+        committer = BranchCommitter(conn, ep_service_id)
         transition = engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -615,10 +618,16 @@ class TestExecutionResults:
             engine.record_result(transition["id"], "timeout", "timed out")
             conn.commit()
 
+            head_id, version = BranchRepository(conn).get_head(setup["branch"]["id"])
+            conn.commit()
             result = engine.reconcile(
                 transition_id=transition["id"],
                 final_status="succeeded",
                 result_summary="Actually completed",
+                branch_committer=committer,
+                expected_head_id=head_id,
+                expected_version=version,
+                lattice_id=setup["lattice"]["id"],
             )
             conn.commit()
             assert result["stage"] == "succeeded"

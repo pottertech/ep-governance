@@ -96,24 +96,26 @@ class BranchCommitter:
         # 'executing'.  On success it commits atomically.
         #
         # Issue High 6: transaction() now requires a clean connection (it no
-        # longer silently commits pending autobegun work).  Commit any pending
-        # reads here so the connection is clean before we begin.
+        # Require a clean connection — do not silently commit pending work.
+        # Clean any pending autobegun reads before entering the transaction.
+        # This is safe — prior operations are non-mutating reads.
         if self.conn.in_transaction():
             self.conn.commit()
         with transaction(self.conn):
             # Step 1: Verify transition stage is 'executing'.
             # The stage advancement to 'succeeded' happens atomically inside
             # this transaction — if any later step fails, the transaction
-            # rolls back and the transition stays at 'executing'.  We no
-            # longer accept 'succeeded' (Issue High 7 — prevents double-commit).
+            # rolls back and the transition stays at its original stage.
+            # Accept 'executing' (normal flow) and 'execution_uncertain'
+            # (reconciliation flow). Do NOT accept 'succeeded' (double-commit).
             transition = self.transition_repo.get_transition(transition_id)
             if transition is None:
                 raise IllegalTransitionError(f"Transition {transition_id} not found")
             stage = transition.get("stage", "")
-            if stage != "executing":
+            if stage not in ("executing", "execution_uncertain"):
                 raise IllegalTransitionError(
                     f"Transition {transition_id} is in stage '{stage}', "
-                    "must be 'executing' to commit"
+                    "must be 'executing' or 'execution_uncertain' to commit"
                 )
 
             # Step 2: Verify branch head and version (optimistic concurrency)
@@ -186,7 +188,7 @@ class BranchCommitter:
             updated_stage = self.transition_repo.update_stage(
                 transition_id,
                 "succeeded",
-                expected_current_stage="executing",
+                expected_current_stage=stage,
             )
             if not updated_stage:
                 raise IllegalTransitionError(

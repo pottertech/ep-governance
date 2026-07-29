@@ -79,6 +79,15 @@ class IllegalTransitionError(TransitionError):
     """A transition from one stage to another is not legal."""
 
 
+class ApprovalAlreadyDecidedError(TransitionError):
+    """The approval request was already decided by another approver.
+
+    Raised when :meth:`ApprovalRepository.decide` returns ``None`` because its
+    ``WHERE status = 'pending'`` guard failed — i.e. a concurrent approver
+    already approved or denied the request (Issue Critical 3).
+    """
+
+
 class StaleHeadError(TransitionError):
     """The branch head has advanced since the proposal was created.
 
