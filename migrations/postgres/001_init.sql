@@ -23,7 +23,8 @@ CREATE TABLE ep_principals (
     description   TEXT,
     status        TEXT NOT NULL DEFAULT 'active'
                       CHECK (status IN ('active', 'suspended', 'revoked')),
-    registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ============================================================================
@@ -120,7 +121,8 @@ CREATE TABLE ep_policies (
     justification      TEXT,
     origin             TEXT NOT NULL DEFAULT 'local',
     trust_status       TEXT NOT NULL DEFAULT 'trusted',
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX idx_ep_policies_actions      ON ep_policies USING GIN (actions);
@@ -185,6 +187,14 @@ CREATE TABLE ep_transitions (
     result_summary                TEXT,
     execution_attempt_id          TEXT,
     requires_manual_reconciliation BOOLEAN NOT NULL DEFAULT FALSE,
+    action                        TEXT,
+    resource                      TEXT,
+    payload                       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    bt_planning_budget_before     FLOAT,
+    bt_planning_budget_after      FLOAT,
+    policy_set_hash               TEXT,
+    matched_policy_versions       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    updated_at                    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     created_at                    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
@@ -211,7 +221,10 @@ CREATE TABLE ep_authorizations (
     expires_at              TIMESTAMPTZ NOT NULL,
     used                    BOOLEAN NOT NULL DEFAULT FALSE,
     used_at                 TIMESTAMPTZ,
-    execution_attempt_id    TEXT
+    execution_attempt_id    TEXT,
+    tool                    TEXT,
+    nonce                   TEXT,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 -- ============================================================================
