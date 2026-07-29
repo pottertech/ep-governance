@@ -383,7 +383,29 @@ def _handle_tool_call(
         # --- Role-based authorization -----------------------------------
         required_roles = TOOL_REQUIRED_ROLES.get(name)
         if required_roles is not None:
-            role_err = _check_role(conn, authenticated_principal_id, required_roles)
+            # Resolve project_id from tool arguments for project-scoped auth.
+            project_id: str | None = None
+            if name in ("ep_status", "ep_log", "ep_pending_approvals"):
+                project_id = _resolve_project_id(conn, branch_id=arguments.get("branch_id"))
+            elif name in ("ep_list_policies",):
+                project_id = arguments.get("project_id") or _resolve_project_id(
+                    conn, branch_id=arguments.get("branch_id")
+                )
+            elif name in ("ep_audit_verify",):
+                project_id = _resolve_project_id(conn, lattice_id=arguments.get("lattice_id"))
+            elif name in ("ep_approve", "ep_deny"):
+                project_id = _resolve_project_id(conn, approval_id=arguments.get("approval_id"))
+            # ep_check and ep_execute use branch_id for project context.
+            elif name in ("ep_check", "ep_execute"):
+                project_id = _resolve_project_id(conn, branch_id=arguments.get("branch_id"))
+
+            role_err = _check_role(
+                conn,
+                authenticated_principal_id,
+                required_roles,
+                project_id=project_id,
+                tool_name=name,
+            )
             if role_err is not None:
                 return role_err
 
@@ -414,32 +436,64 @@ def _handle_tool_call(
             return {"error": f"Unknown tool: {name}"}
 
 
+# Tools allowed during bootstrap mode (setup-only operations only).
+# Bootstrap mode grants access to read current policies and view state —
+# it does NOT allow execution, approvals, denials, audit, log, or checks.
+BOOTSTRAP_ALLOWED_TOOLS: frozenset[str] = frozenset(
+    {
+        "ep_list_policies",
+        "ep_status",
+    }
+)
+
+
 def _check_role(
     conn: Any,
     principal_id: str,
     required_roles: list[str],
+    project_id: str | None = None,
+    tool_name: str | None = None,
 ) -> dict[str, Any] | None:
     """Check whether *principal_id* holds any of *required_roles*.
 
     Queries ``ep_role_bindings`` joined with ``ep_roles`` to determine the
-    principal's roles.  Fail closed: if no role bindings exist, access is
-    denied unless ``EP_BOOTSTRAP_MODE=true`` is set in the environment, in
-    which case the first human principal is allowed access for initial
-    bootstrapping.
+    principal's roles, scoped to *project_id*.  Global role bindings
+    (``project_id IS NULL``) always apply; project-scoped bindings apply only
+    when their ``project_id`` matches.  If *project_id* is ``None`` (no
+    project context), only global role bindings are considered — this
+    prevents a principal with a role in Project A from accessing Project B.
+
+    Fail closed: if no matching role bindings exist, access is denied unless
+    ``EP_BOOTSTRAP_MODE=true`` is set in the environment, in which case the
+    first human principal is allowed access to **setup-only tools** (see
+    ``BOOTSTRAP_ALLOWED_TOOLS``) for initial bootstrapping.  All other tools
+    are denied with an instruction to create an administrator role binding.
 
     Returns ``None`` if authorized, or an error dict if denied.
     """
     import sqlalchemy as sa
 
-    result = conn.execute(
-        sa.text(
+    if project_id is None:
+        # No project context — only global role bindings (project_id IS NULL).
+        query = (
             "SELECT r.name "
             "FROM ep_role_bindings rb "
             "JOIN ep_roles r ON rb.role_id = r.id "
-            "WHERE rb.principal_id = :principal_id"
-        ),
-        {"principal_id": principal_id},
-    )
+            "WHERE rb.principal_id = :principal_id "
+            "  AND rb.project_id IS NULL"
+        )
+        params: dict[str, Any] = {"principal_id": principal_id}
+    else:
+        query = (
+            "SELECT r.name "
+            "FROM ep_role_bindings rb "
+            "JOIN ep_roles r ON rb.role_id = r.id "
+            "WHERE rb.principal_id = :principal_id "
+            "  AND (rb.project_id IS NULL OR rb.project_id = :project_id)"
+        )
+        params = {"principal_id": principal_id, "project_id": project_id}
+
+    result = conn.execute(sa.text(query), params)
     held_roles = {row[0] for row in result.fetchall()}
 
     if held_roles:
@@ -454,10 +508,10 @@ def _check_role(
             )
         }
 
-    # No role bindings exist — fail closed.
+    # No matching role bindings exist — fail closed.
     # The ONLY exception is explicit bootstrap mode (EP_BOOTSTRAP_MODE=true),
-    # which allows the first human principal to access for initial setup.
-    # This must be turned off after bootstrapping is complete.
+    # which allows the first human principal to access setup-only tools for
+    # initial setup.  This must be turned off after bootstrapping is complete.
     bootstrap_mode = os.environ.get("EP_BOOTSTRAP_MODE", "").lower() == "true"
     if bootstrap_mode:
         repo = PrincipalRepository(conn)
@@ -473,7 +527,15 @@ def _check_role(
                 )
             ).scalar()
             if human_with_roles == 0:
-                return None
+                # Bootstrap mode: only setup-only tools are allowed.
+                if tool_name is not None and tool_name in BOOTSTRAP_ALLOWED_TOOLS:
+                    return None
+                return {
+                    "error": (
+                        "Bootstrap mode allows only setup operations. "
+                        "Create an administrator role binding first."
+                    )
+                }
 
     return {
         "error": (
@@ -505,34 +567,84 @@ def _get_ep_service_id(conn: Any) -> str:
     return p["id"]
 
 
-def _resolve_project_id(conn: Any, args: dict[str, Any]) -> str | None:
-    """Resolve the project_id from the arguments.
+def _resolve_project_id(
+    conn: Any,
+    branch_id: str | None = None,
+    lattice_id: str | None = None,
+    transition_id: str | None = None,
+    approval_id: str | None = None,
+) -> str | None:
+    """Resolve any object reference to its project_id.
 
-    If ``project_id`` is provided directly, use it.  If ``branch_id`` is
-    provided, resolve it to its project_id via the lattice.  If neither is
-    provided, return ``None`` (callers should return empty results to avoid
-    cross-project data leakage).
+    Resolution chain:
+      * branch_id -> ep_branches.lattice_id -> ep_lattices.project_id
+      * lattice_id -> ep_lattices.project_id
+      * transition_id -> ep_transitions.branch_id -> lattice_id -> project_id
+      * approval_id -> ep_approval_requests.transition_id -> branch_id
+        -> lattice_id -> project_id
+
+    Returns the resolved ``project_id`` or ``None`` if the object cannot be
+    found or no identifiers were provided.
     """
     import sqlalchemy as sa
 
-    project_id = args.get("project_id")
-    if project_id:
-        return project_id
+    def _lattice_to_project(lid: str) -> str | None:
+        row = conn.execute(
+            sa.text("SELECT project_id FROM ep_lattices WHERE id = :id"),
+            {"id": lid},
+        ).fetchone()
+        return row[0] if row else None
 
-    branch_id = args.get("branch_id")
+    def _branch_to_lattice(bid: str) -> str | None:
+        row = conn.execute(
+            sa.text("SELECT lattice_id FROM ep_branches WHERE id = :id"),
+            {"id": bid},
+        ).fetchone()
+        return row[0] if row else None
+
+    # lattice_id — direct lookup
+    if lattice_id:
+        return _lattice_to_project(lattice_id)
+
+    # branch_id -> lattice_id -> project_id
     if branch_id:
-        result = conn.execute(
-            sa.text(
-                "SELECT l.project_id "
-                "FROM ep_branches b "
-                "JOIN ep_lattices l ON b.lattice_id = l.id "
-                "WHERE b.id = :branch_id"
-            ),
-            {"branch_id": branch_id},
-        )
-        row = result.fetchone()
+        lid = _branch_to_lattice(branch_id)
+        if lid:
+            return _lattice_to_project(lid)
+        return None
+
+    # transition_id -> branch_id -> lattice_id -> project_id
+    if transition_id:
+        row = conn.execute(
+            sa.text("SELECT branch_id FROM ep_transitions WHERE id = :id"),
+            {"id": transition_id},
+        ).fetchone()
         if row:
-            return row[0]
+            bid = row[0]
+            lid = _branch_to_lattice(bid) if bid else None
+            if lid:
+                return _lattice_to_project(lid)
+        return None
+
+    # approval_id -> transition_id -> branch_id -> lattice_id -> project_id
+    if approval_id:
+        row = conn.execute(
+            sa.text("SELECT transition_id FROM ep_approval_requests WHERE id = :id"),
+            {"id": approval_id},
+        ).fetchone()
+        if row:
+            tid = row[0]
+            if tid:
+                trow = conn.execute(
+                    sa.text("SELECT branch_id FROM ep_transitions WHERE id = :id"),
+                    {"id": tid},
+                ).fetchone()
+                if trow:
+                    bid = trow[0]
+                    lid = _branch_to_lattice(bid) if bid else None
+                    if lid:
+                        return _lattice_to_project(lid)
+        return None
 
     return None
 
@@ -586,7 +698,9 @@ def _ep_log(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     import sqlalchemy as sa
 
     # High fix 5: filter by project_id to prevent cross-project data leakage.
-    project_id = _resolve_project_id(conn, args)
+    project_id = _resolve_project_id(conn, branch_id=args.get("branch_id"))
+    if project_id is None and args.get("project_id"):
+        project_id = args.get("project_id")
     if project_id is None:
         # No project_id or branch_id provided — return empty results.
         return {"transitions": []}
@@ -612,7 +726,9 @@ def _ep_list_policies(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     # agent-scoped.  However, we still require a project context (via
     # project_id or branch_id) so the caller is scoped to a single project.
     # If no project context is provided, return empty results.
-    project_id = _resolve_project_id(conn, args)
+    project_id = _resolve_project_id(conn, branch_id=args.get("branch_id"))
+    if project_id is None and args.get("project_id"):
+        project_id = args.get("project_id")
     if project_id is None:
         return {"policies": []}
 
@@ -625,7 +741,9 @@ def _ep_pending_approvals(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     import sqlalchemy as sa
 
     # High fix 5: filter by project_id to prevent cross-project data leakage.
-    project_id = _resolve_project_id(conn, args)
+    project_id = _resolve_project_id(conn, branch_id=args.get("branch_id"))
+    if project_id is None and args.get("project_id"):
+        project_id = args.get("project_id")
     if project_id is None:
         return {"pending_approvals": []}
 

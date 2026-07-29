@@ -16,6 +16,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import json
+import sys
 from typing import TYPE_CHECKING, Any
 
 from .audit import AuditWriter
@@ -42,6 +43,8 @@ from .policy_engine import PolicyEngine, PolicyResolution
 
 if TYPE_CHECKING:
     from sqlalchemy.engine import Connection
+
+    from .branches import BranchCommitter
 
 __all__ = [
     "LEGAL_TRANSITIONS",
@@ -775,16 +778,44 @@ class TransitionEngine:
         transition_id: str,
         final_status: str,
         result_summary: str,
+        *,
+        branch_committer: BranchCommitter | None = None,
+        branch_description: str | None = None,
+        bt_planning_budget: float = 0.0,
+        metadata: dict[str, Any] | None = None,
+        expected_head_id: str | None = None,
+        expected_version: int | None = None,
+        lattice_id: str | None = None,
     ) -> dict[str, Any]:
         """Reconcile a transition in the ``execution_uncertain`` stage.
 
         After manual investigation, the operator determines the final
         outcome and records it.
 
+        When *final_status* is ``"succeeded"`` and a *branch_committer* is
+        provided, this method attempts branch commitment the same way the
+        proxy does — creating a graph node and advancing the branch head.
+        If branch commitment fails, the transition is reverted to
+        ``execution_uncertain`` with ``requires_manual_reconciliation=True``
+        so the operator can retry.
+
+        When *branch_committer* is ``None`` (not provided), the current
+        behaviour is preserved — the stage is advanced but no node is
+        created and a warning is logged to stderr.
+
         Args:
-            transition_id:  XID of the transition.
-            final_status:   Either ``"succeeded"`` or ``"failed"``.
-            result_summary: Human-readable reconciliation summary.
+            transition_id:        XID of the transition.
+            final_status:         Either ``"succeeded"`` or ``"failed"``.
+            result_summary:       Human-readable reconciliation summary.
+            branch_committer:     Optional :class:`BranchCommitter` for node
+                                  creation on successful reconciliation.
+            branch_description:   Description for the realized node
+                                  (defaults to *result_summary*).
+            bt_planning_budget:   Planning budget at this state.
+            metadata:             Arbitrary state metadata for the node.
+            expected_head_id:     Branch head the caller expects.
+            expected_version:     Branch version the caller expects.
+            lattice_id:           Lattice for audit event tracking.
 
         Returns:
             The updated transition row as a dict.
@@ -807,7 +838,106 @@ class TransitionEngine:
         agent_id: str = transition.get("agent_id", "")
 
         if final_status == "succeeded":
-            transition = self.advance_stage(transition_id, "succeeded")
+            # If a branch committer is provided, attempt full branch
+            # commitment (node creation + head advancement) the same way
+            # the proxy does.  If it fails, revert to execution_uncertain.
+            if branch_committer is not None:
+                # Resolve branch context parameters from the transition /
+                # branch state, falling back to caller-supplied values.
+                commit_description = (
+                    branch_description if branch_description is not None else result_summary
+                )
+                commit_metadata = metadata if metadata is not None else {}
+
+                # Resolve expected_head_id / expected_version
+                stored_head_id: str | None = transition.get("expected_head_id")
+                stored_version_raw = transition.get("expected_version")
+                current_head, current_version = self.branch_repo.get_head(branch_id)
+                commit_expected_head = (
+                    expected_head_id
+                    if expected_head_id is not None
+                    else (stored_head_id if stored_head_id is not None else current_head)
+                )
+                commit_expected_version = (
+                    expected_version
+                    if expected_version is not None
+                    else (
+                        int(stored_version_raw)
+                        if stored_version_raw is not None
+                        else current_version
+                    )
+                )
+
+                # Resolve lattice_id
+                if lattice_id is not None:
+                    commit_lattice_id = lattice_id
+                else:
+                    branch = self.branch_repo.get_branch(branch_id)
+                    commit_lattice_id = (
+                        branch.get("lattice_id", branch_id) if branch is not None else branch_id
+                    )
+
+                try:
+                    branch_committer.commit(
+                        transition_id=transition_id,
+                        branch_id=branch_id,
+                        agent_id=agent_id,
+                        description=commit_description,
+                        bt_planning_budget=bt_planning_budget,
+                        metadata=commit_metadata,
+                        expected_head_id=commit_expected_head,
+                        expected_version=commit_expected_version,
+                        lattice_id=commit_lattice_id,
+                    )
+                except Exception as exc:
+                    # Branch commitment failed — revert to execution_uncertain
+                    # so the operator can retry.  The advance_stage call below
+                    # has NOT happened yet (we haven't advanced to succeeded),
+                    # so the transition is still in execution_uncertain.  We
+                    # only need to ensure requires_manual_reconciliation is
+                    # set and log the failure.
+                    self._set_requires_manual_reconciliation(transition_id, True)
+                    self._write_audit_event(
+                        transition_id=transition_id,
+                        branch_id=branch_id,
+                        event_type="transition.reconcile_commit_failed",
+                        actor_principal_id=agent_id,
+                        event_data={
+                            "transition_id": transition_id,
+                            "final_status": final_status,
+                            "result_summary": result_summary,
+                            "requires_manual_reconciliation": True,
+                            "error": str(exc),
+                        },
+                    )
+                    # Re-read the (still execution_uncertain) transition
+                    transition = self.transition_repo.get_transition(transition_id)
+                    if transition is None:
+                        raise IllegalTransitionError(
+                            f"Transition '{transition_id}' disappeared after "
+                            f"reconcile commit failure"
+                        )
+                    return transition
+
+                # Branch commitment succeeded — re-read the transition
+                # (BranchCommitter.commit() advances the stage to succeeded
+                # and writes its own audit event).
+                transition = self.transition_repo.get_transition(transition_id)
+                if transition is None:
+                    raise IllegalTransitionError(
+                        f"Transition '{transition_id}' disappeared after "
+                        f"successful reconcile commit"
+                    )
+            else:
+                # No branch committer — advance stage only, log a warning
+                # that no node was created.
+                print(
+                    f"[EP-Governance WARNING] reconcile() advanced transition "
+                    f"{transition_id} to 'succeeded' without branch commitment "
+                    f"— no graph node was created (branch_committer not provided)",
+                    file=sys.stderr,
+                )
+                transition = self.advance_stage(transition_id, "succeeded")
         elif final_status == "failed":
             transition = self.advance_stage(transition_id, "failed")
         else:

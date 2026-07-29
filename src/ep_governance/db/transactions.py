@@ -3,7 +3,7 @@
 Provides context managers for database transactions with dialect-aware
 behaviour for PostgreSQL and SQLite.
 
-- ``transaction(conn)`` — plain transaction (BEGIN / COMMIT / ROLLBACK).
+- ``transaction(conn)`` — plain transaction (commit on success, rollback on exception).
 - ``serializable_transaction(conn)`` — SERIALIZABLE isolation on PostgreSQL,
   BEGIN IMMEDIATE on SQLite (SQLite has no isolation levels beyond the
   begin-mode).
@@ -11,6 +11,8 @@ behaviour for PostgreSQL and SQLite.
   (``pg_advisory_xact_lock``), BEGIN IMMEDIATE on SQLite.
 
 All three are context managers (``with transaction(conn) as conn: ...``).
+
+Uses SQLAlchemy 2.0's transaction API to avoid conflicts with autobegin.
 """
 
 from __future__ import annotations
@@ -36,23 +38,19 @@ __all__ = [
 def transaction(conn: Connection) -> Iterator[Connection]:
     """Begin a transaction, yield the connection, commit on success, rollback on exception.
 
-    Uses SQLAlchemy 2.0's implicit transaction model.  We issue explicit
-    BEGIN / COMMIT / ROLLBACK so the behaviour is identical on both
-    PostgreSQL and SQLite regardless of the driver's autocommit defaults.
+    Handles SQLAlchemy 2.0's autobegin behavior by committing any pending
+    autobegun transaction before starting an explicit one.
     """
-    dialect = conn.dialect.name
-    if dialect == "sqlite":
-        # SQLite: use BEGIN IMMEDIATE to acquire a write lock immediately,
-        # preventing "database is locked" errors during concurrent writes.
-        conn.execute(text("BEGIN IMMEDIATE"))
-    else:
-        # PostgreSQL (and others): plain BEGIN
-        conn.execute(text("BEGIN"))
+    # If SQLAlchemy has already autobegun a transaction (from prior reads),
+    # commit it first so we can start a clean explicit transaction.
+    if conn.in_transaction():
+        conn.commit()
+    trans = conn.begin()
     try:
         yield conn
-        conn.execute(text("COMMIT"))
+        trans.commit()
     except Exception:
-        conn.execute(text("ROLLBACK"))
+        trans.rollback()
         raise
 
 
@@ -60,21 +58,46 @@ def transaction(conn: Connection) -> Iterator[Connection]:
 def serializable_transaction(conn: Connection) -> Iterator[Connection]:
     """Begin a SERIALIZABLE transaction.
 
-    PostgreSQL: ``BEGIN ISOLATION LEVEL SERIALIZABLE``
-    SQLite: ``BEGIN IMMEDIATE`` (SQLite SERIALIZABLE is the default under
+    PostgreSQL: SERIALIZABLE isolation level.
+    SQLite: BEGIN IMMEDIATE (SQLite SERIALIZABLE is the default under
     IMMEDIATE; there is no finer-grained isolation control).
+
+    Uses SQLAlchemy's conn.begin() and SET TRANSACTION ISOLATION LEVEL
+    for PostgreSQL. For SQLite, uses BEGIN IMMEDIATE.
     """
     dialect = conn.dialect.name
+    # Commit any pending autobegun transaction first
+    if conn.in_transaction():
+        conn.commit()
     if dialect == "sqlite":
-        conn.execute(text("BEGIN IMMEDIATE"))
+        # SQLite: use BEGIN IMMEDIATE to acquire a write lock immediately
+        # Only if not already in a transaction
+        if not conn.in_transaction():
+            conn.execute(text("BEGIN IMMEDIATE"))
+            try:
+                yield conn
+                conn.execute(text("COMMIT"))
+            except Exception:
+                conn.execute(text("ROLLBACK"))
+                raise
+        else:
+            trans = conn.begin()
+            try:
+                yield conn
+                trans.commit()
+            except Exception:
+                trans.rollback()
+                raise
     else:
-        conn.execute(text("BEGIN ISOLATION LEVEL SERIALIZABLE"))
-    try:
-        yield conn
-        conn.execute(text("COMMIT"))
-    except Exception:
-        conn.execute(text("ROLLBACK"))
-        raise
+        # PostgreSQL: use SQLAlchemy begin() with isolation level
+        trans = conn.begin()
+        try:
+            conn.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
+            yield conn
+            trans.commit()
+        except Exception:
+            trans.rollback()
+            raise
 
 
 @contextlib.contextmanager
@@ -84,20 +107,42 @@ def locked_transaction(conn: Connection, lock_key: int | str) -> Iterator[Connec
 
     PostgreSQL: ``SELECT pg_advisory_xact_lock(:lock_key)`` — the lock is
     automatically released at COMMIT/ROLLBACK (xact-level).
-
     SQLite: ``BEGIN IMMEDIATE`` — the write lock itself serialises access.
     The *lock_key* is accepted but ignored on SQLite.
     """
     dialect = conn.dialect.name
-    if dialect == "sqlite":
+    in_transaction = conn.in_transaction()
+
+    if in_transaction:
+        nested = conn.begin_nested()
+        try:
+            if dialect != "sqlite":
+                conn.execute(
+                    text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                    {"lock_key": int(lock_key)},
+                )
+            yield conn
+            nested.commit()
+        except Exception:
+            nested.rollback()
+            raise
+    elif dialect == "sqlite":
         conn.execute(text("BEGIN IMMEDIATE"))
+        try:
+            yield conn
+            conn.execute(text("COMMIT"))
+        except Exception:
+            conn.execute(text("ROLLBACK"))
+            raise
     else:
-        # PostgreSQL: acquire a transaction-scoped advisory lock.
-        # lock_key is cast to bigint for pg_advisory_xact_lock.
-        conn.execute(text("SELECT pg_advisory_xact_lock(:lock_key)"), {"lock_key": int(lock_key)})
-    try:
-        yield conn
-        conn.execute(text("COMMIT"))
-    except Exception:
-        conn.execute(text("ROLLBACK"))
-        raise
+        trans = conn.begin()
+        try:
+            conn.execute(
+                text("SELECT pg_advisory_xact_lock(:lock_key)"),
+                {"lock_key": int(lock_key)},
+            )
+            yield conn
+            trans.commit()
+        except Exception:
+            trans.rollback()
+            raise

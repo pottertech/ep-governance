@@ -145,20 +145,24 @@ class TestToolCalls:
         assert result["policies"] == []
 
     def test_ep_pending_approvals_empty(self, test_principal_id):
-        """ep_pending_approvals returns empty list when no pending approvals."""
+        """ep_pending_approvals is denied in bootstrap mode (setup-only)."""
         result = _handle_tool_call("ep_pending_approvals", {}, "enforced", test_principal_id)
-        assert "pending_approvals" in result
-        assert result["pending_approvals"] == []
+        # In bootstrap mode with no role bindings, ep_pending_approvals is
+        # denied — only ep_list_policies and ep_status are setup-allowed.
+        assert "error" in result
+        assert "Bootstrap mode" in result["error"]
 
     def test_ep_audit_verify_empty_lattice(self, test_principal_id):
-        """ep_audit_verify returns valid=True for a lattice with no events."""
+        """ep_audit_verify is denied in bootstrap mode (setup-only)."""
         result = _handle_tool_call(
             "ep_audit_verify",
             {"lattice_id": "nonexistent"},
             "enforced",
             test_principal_id,
         )
-        assert result["valid"] is True
+        # In bootstrap mode with no role bindings, ep_audit_verify is denied.
+        assert "error" in result
+        assert "Bootstrap mode" in result["error"]
 
     def test_unknown_tool_returns_error(self, test_principal_id):
         """Calling an unknown tool returns an error."""

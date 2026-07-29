@@ -27,6 +27,7 @@ from sqlalchemy.engine import Connection
 
 from .audit import AuditWriter
 from .db.repositories import BranchRepository, NodeRepository, TransitionRepository
+from .db.transactions import transaction
 from .errors import IllegalTransitionError, StaleHeadError
 from .xid import XID
 
@@ -88,121 +89,125 @@ class BranchCommitter:
                 that already advanced the stage.
             StaleHeadError: If the branch head has advanced since the proposal.
         """
-        # Step 1: Verify transition stage is 'executing' (normal path) or
-        # 'succeeded' (legacy path where the caller already advanced the stage).
-        # We accept 'executing' so that the stage advancement to 'succeeded'
-        # happens atomically inside this transaction — if any later step fails,
-        # the transaction rolls back and the transition stays at 'executing'.
-        transition = self.transition_repo.get_transition(transition_id)
-        if transition is None:
-            raise IllegalTransitionError(f"Transition {transition_id} not found")
-        stage = transition.get("stage", "")
-        if stage not in ("executing", "succeeded"):
-            raise IllegalTransitionError(
-                f"Transition {transition_id} is in stage '{stage}', "
-                "must be 'executing' or 'succeeded' to commit"
-            )
-
-        # Step 2: Verify branch head and version (optimistic concurrency)
-        head_node_id, current_version = self.branch_repo.get_head(branch_id)
-        if expected_head_id is not None and head_node_id != expected_head_id:
-            raise StaleHeadError(
-                f"Branch head mismatch: expected {expected_head_id}, got {head_node_id}"
-            )
-        if current_version != expected_version:
-            raise StaleHeadError(
-                f"Branch version mismatch: expected {expected_version}, got {current_version}"
-            )
-
-        # Step 3: Insert the realized node
-        new_node_id = str(XID.new())
-        now = _now_iso()
-        node = self.node_repo.insert_node(
-            node_id=new_node_id,
-            branch_id=branch_id,
-            agent_id=agent_id,
-            description=description,
-            bt_planning_budget=bt_planning_budget,
-            metadata=metadata,
-            status="committed",
-        )
-
-        # Step 4: Insert dependency edge (from old head to new node)
-        if head_node_id is not None:
-            self.conn.execute(
-                sa.text(
-                    "INSERT INTO ep_edges (id, upstream_node_id, downstream_node_id, "
-                    "edge_type, weight, created_at) "
-                    "VALUES (:id, :upstream, :downstream, 'dependency', 1.0, :now)"
-                ),
-                {
-                    "id": str(XID.new()),
-                    "upstream": head_node_id,
-                    "downstream": new_node_id,
-                    "now": now,
-                },
-            )
-
-        # Step 5: Mark prior head superseded (if there was one)
-        if head_node_id is not None:
-            self.node_repo.mark_superseded(head_node_id)
-
-        # Step 6: Update branch head
-        new_version = expected_version + 1
-        updated = self.branch_repo.update_head(branch_id, new_node_id, expected_version)
-        if not updated:
-            raise StaleHeadError(
-                f"Branch head update failed: another agent committed first "
-                f"(branch {branch_id}, expected version {expected_version})"
-            )
-
-        # Step 7: Branch version is incremented as part of step 6
-        # (update_head does UPDATE ... WHERE version = :expected, sets new head)
-
-        # Step 8: Record transition result (link to_node_id) AND advance the
-        # stage to 'succeeded' atomically as part of this same transaction.
-        # If the transition is still in 'executing' (the normal path), we
-        # advance it to 'succeeded' with an optimistic stage guard so that
-        # a concurrent record_result(failure) cannot race with us.  If it is
-        # already 'succeeded' (legacy caller), we skip the stage update.
-        self.transition_repo.update_result(
-            transition_id,
-            exit_status="success",
-            result_summary=description,
-            to_node_id=new_node_id,
-        )
-        if stage == "executing":
-            updated_stage = self.transition_repo.update_stage(
-                transition_id,
-                "succeeded",
-                expected_current_stage="executing",
-            )
-            if not updated_stage:
+        # All 9 steps run inside a single explicit transaction.  If any step
+        # raises, the context manager rolls back and the transition stays at
+        # 'executing'.  On success it commits atomically.
+        with transaction(self.conn):
+            # Step 1: Verify transition stage is 'executing' (normal path) or
+            # 'succeeded' (legacy path where the caller already advanced the stage).
+            # We accept 'executing' so that the stage advancement to 'succeeded'
+            # happens atomically inside this transaction — if any later step fails,
+            # the transaction rolls back and the transition stays at 'executing'.
+            transition = self.transition_repo.get_transition(transition_id)
+            if transition is None:
+                raise IllegalTransitionError(f"Transition {transition_id} not found")
+            stage = transition.get("stage", "")
+            if stage not in ("executing", "succeeded"):
                 raise IllegalTransitionError(
-                    f"Transition {transition_id} stage advanced concurrently; "
-                    "could not advance to 'succeeded'"
+                    f"Transition {transition_id} is in stage '{stage}', "
+                    "must be 'executing' or 'succeeded' to commit"
                 )
 
-        # Step 9: Append audit event through trusted audit writer
-        self.audit_writer.write_event(
-            lattice_id=lattice_id,
-            event_type="branch_committed",
-            event_data={
-                "transition_id": transition_id,
-                "branch_id": branch_id,
-                "new_node_id": new_node_id,
-                "old_head_id": head_node_id,
-                "new_version": new_version,
-            },
-            actor_principal_id=agent_id,
-            authenticated_caller_id=self.ep_service_principal_id,
-        )
+            # Step 2: Verify branch head and version (optimistic concurrency)
+            head_node_id, current_version = self.branch_repo.get_head(branch_id)
+            if expected_head_id is not None and head_node_id != expected_head_id:
+                raise StaleHeadError(
+                    f"Branch head mismatch: expected {expected_head_id}, got {head_node_id}"
+                )
+            if current_version != expected_version:
+                raise StaleHeadError(
+                    f"Branch version mismatch: expected {expected_version}, got {current_version}"
+                )
 
-        return {
-            "node_id": new_node_id,
-            "branch_id": branch_id,
-            "version": new_version,
-        }
+            # Step 3: Insert the realized node
+            new_node_id = str(XID.new())
+            now = _now_iso()
+            node = self.node_repo.insert_node(
+                node_id=new_node_id,
+                branch_id=branch_id,
+                agent_id=agent_id,
+                description=description,
+                bt_planning_budget=bt_planning_budget,
+                metadata=metadata,
+                status="committed",
+            )
+
+            # Step 4: Insert dependency edge (from old head to new node)
+            if head_node_id is not None:
+                self.conn.execute(
+                    sa.text(
+                        "INSERT INTO ep_edges (id, upstream_node_id, downstream_node_id, "
+                        "edge_type, weight, created_at) "
+                        "VALUES (:id, :upstream, :downstream, 'dependency', 1.0, :now)"
+                    ),
+                    {
+                        "id": str(XID.new()),
+                        "upstream": head_node_id,
+                        "downstream": new_node_id,
+                        "now": now,
+                    },
+                )
+
+            # Step 5: Mark prior head superseded (if there was one)
+            if head_node_id is not None:
+                self.node_repo.mark_superseded(head_node_id)
+
+            # Step 6: Update branch head
+            new_version = expected_version + 1
+            updated = self.branch_repo.update_head(branch_id, new_node_id, expected_version)
+            if not updated:
+                raise StaleHeadError(
+                    f"Branch head update failed: another agent committed first "
+                    f"(branch {branch_id}, expected version {expected_version})"
+                )
+
+            # Step 7: Branch version is incremented as part of step 6
+            # (update_head does UPDATE ... WHERE version = :expected, sets new head)
+
+            # Step 8: Record transition result (link to_node_id) AND advance the
+            # stage to 'succeeded' atomically as part of this same transaction.
+            # If the transition is still in 'executing' (the normal path), we
+            # advance it to 'succeeded' with an optimistic stage guard so that
+            # a concurrent record_result(failure) cannot race with us.  If it is
+            # already 'succeeded' (legacy caller), we skip the stage update.
+            self.transition_repo.update_result(
+                transition_id,
+                exit_status="success",
+                result_summary=description,
+                to_node_id=new_node_id,
+            )
+            if stage == "executing":
+                updated_stage = self.transition_repo.update_stage(
+                    transition_id,
+                    "succeeded",
+                    expected_current_stage="executing",
+                )
+                if not updated_stage:
+                    raise IllegalTransitionError(
+                        f"Transition {transition_id} stage advanced concurrently; "
+                        "could not advance to 'succeeded'"
+                    )
+
+            # Step 9: Append audit event through trusted audit writer
+            self.audit_writer.write_event(
+                lattice_id=lattice_id,
+                event_type="branch_committed",
+                event_data={
+                    "transition_id": transition_id,
+                    "branch_id": branch_id,
+                    "new_node_id": new_node_id,
+                    "old_head_id": head_node_id,
+                    "new_version": new_version,
+                },
+                actor_principal_id=agent_id,
+                authenticated_caller_id=self.ep_service_principal_id,
+            )
+
+            return {
+                "node_id": new_node_id,
+                "branch_id": branch_id,
+                "version": new_version,
+            }
 
 
 def commit_branch_head(

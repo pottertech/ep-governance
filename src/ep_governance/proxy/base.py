@@ -19,6 +19,7 @@ All proxies inherit from this base. A proxy:
 
 from __future__ import annotations
 
+import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -32,7 +33,7 @@ from ..branches import BranchCommitter
 from ..canonical import canonical_hash
 from ..classification import get_classifier
 from ..db.transactions import serializable_transaction
-from ..errors import IllegalTransitionError
+from ..errors import EPError, IllegalTransitionError
 from ..policy_engine import PolicyEngine
 from ..transitions import TransitionEngine
 from ..xid import XID
@@ -364,91 +365,92 @@ class GovernedProxy(ABC):
         if self.transition_engine is not None:
             if result.exit_status == "success":
                 # Success path: single atomic commit transaction.
-                if self.branch_committer is not None:
+                # Enforced mode requires a branch committer — there is no
+                # fallback that would record success without creating a node.
+                if self.branch_committer is None:
+                    raise EPError("Branch committer is required for enforced mode execution")
+                try:
+                    transition = self.transition_engine.get_transition(
+                        token.transition_id,
+                    )
+                    if transition is None:
+                        raise IllegalTransitionError(f"Transition {token.transition_id} not found")
+                    branch_id: str = transition.get("branch_id", "")
+                    agent_id: str = transition.get("agent_id", "")
+                    expected_head_id: str | None = transition.get(
+                        "expected_head_id",
+                    )
+                    expected_version_raw = transition.get("expected_version")
+
+                    from ..db.repositories import BranchRepository
+
+                    branch_repo = BranchRepository(self.conn)
+                    current_head, current_version = branch_repo.get_head(
+                        branch_id,
+                    )
+                    commit_expected_head = (
+                        expected_head_id if expected_head_id is not None else current_head
+                    )
+                    commit_expected_version = (
+                        int(expected_version_raw)
+                        if expected_version_raw is not None
+                        else current_version
+                    )
+                    branch = branch_repo.get_branch(branch_id)
+                    lattice_id = (
+                        branch.get("lattice_id", branch_id) if branch is not None else branch_id
+                    )
+
+                    self.branch_committer.commit(
+                        transition_id=token.transition_id,
+                        branch_id=branch_id,
+                        agent_id=agent_id,
+                        description=result.result_summary,
+                        bt_planning_budget=0.0,
+                        metadata={},
+                        expected_head_id=commit_expected_head,
+                        expected_version=commit_expected_version,
+                        lattice_id=lattice_id,
+                    )
+                except Exception:
+                    # Commit failed — the action already happened but the
+                    # governance graph does not reflect it.  Roll back the
+                    # failed branch transaction first so the connection is in
+                    # a clean state, then mark the transition as
+                    # execution_uncertain so an operator can reconcile manually.
+                    self.conn.rollback()
                     try:
-                        transition = self.transition_engine.get_transition(
-                            token.transition_id,
-                        )
-                        if transition is None:
-                            raise IllegalTransitionError(
-                                f"Transition {token.transition_id} not found"
-                            )
-                        branch_id: str = transition.get("branch_id", "")
-                        agent_id: str = transition.get("agent_id", "")
-                        expected_head_id: str | None = transition.get(
-                            "expected_head_id",
-                        )
-                        expected_version_raw = transition.get("expected_version")
-
-                        from ..db.repositories import BranchRepository
-
-                        branch_repo = BranchRepository(self.conn)
-                        current_head, current_version = branch_repo.get_head(
-                            branch_id,
-                        )
-                        commit_expected_head = (
-                            expected_head_id if expected_head_id is not None else current_head
-                        )
-                        commit_expected_version = (
-                            int(expected_version_raw)
-                            if expected_version_raw is not None
-                            else current_version
-                        )
-                        branch = branch_repo.get_branch(branch_id)
-                        lattice_id = (
-                            branch.get("lattice_id", branch_id) if branch is not None else branch_id
-                        )
-
-                        self.branch_committer.commit(
+                        self.transition_engine.record_result(
                             transition_id=token.transition_id,
-                            branch_id=branch_id,
-                            agent_id=agent_id,
-                            description=result.result_summary,
-                            bt_planning_budget=0.0,
-                            metadata={},
-                            expected_head_id=commit_expected_head,
-                            expected_version=commit_expected_version,
-                            lattice_id=lattice_id,
-                        )
-                    except Exception:
-                        # Commit failed — the action already happened but the
-                        # governance graph does not reflect it.  Mark the
-                        # transition as execution_uncertain so an operator can
-                        # reconcile manually.  Do NOT swallow silently.
-                        try:
-                            self.transition_engine.record_result(
-                                transition_id=token.transition_id,
-                                exit_status="timeout",
-                                result_summary=(
-                                    "Governance commitment failed — "
-                                    "manual reconciliation required "
-                                    f"(reference: {attempt_id})"
-                                ),
-                            )
-                        except Exception:
-                            # If even the reconciliation record fails, we
-                            # cannot hide it — surface it as an uncertain
-                            # result so the caller knows to investigate.
-                            pass
-                        return ExecutionResult(
-                            success=False,
-                            exit_status="uncertain",
+                            exit_status="timeout",
                             result_summary=(
-                                "Execution succeeded but governance commit "
-                                f"failed — manual reconciliation required "
+                                "Governance commitment failed — "
+                                "manual reconciliation required "
                                 f"(reference: {attempt_id})"
                             ),
-                            execution_attempt_id=attempt_id,
-                            started_at=started_at,
-                            completed_at=self._now_iso(),
                         )
-                else:
-                    # No branch committer configured — record success via the
-                    # transition engine so the transition advances.
-                    self.transition_engine.record_result(
-                        transition_id=token.transition_id,
-                        exit_status="success",
-                        result_summary=result.result_summary,
+                    except Exception:
+                        # If even the uncertain-state recording fails, we
+                        # must NOT silently suppress it — log a critical
+                        # error to stderr so operators can investigate.
+                        print(
+                            f"[EP-Governance CRITICAL] Failed to record "
+                            f"execution_uncertain after governance commit "
+                            f"failure: transition_id={token.transition_id} "
+                            f"attempt_id={attempt_id}",
+                            file=sys.stderr,
+                        )
+                    return ExecutionResult(
+                        success=False,
+                        exit_status="uncertain",
+                        result_summary=(
+                            "Execution succeeded but governance commit "
+                            f"failed — manual reconciliation required "
+                            f"(reference: {attempt_id})"
+                        ),
+                        execution_attempt_id=attempt_id,
+                        started_at=started_at,
+                        completed_at=self._now_iso(),
                     )
             elif result.exit_status == "failure":
                 # Failure path: record the failure, no node created.
