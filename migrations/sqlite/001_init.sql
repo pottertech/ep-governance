@@ -372,7 +372,7 @@ CREATE TABLE ep_import_mappings (
     source_entity_id    TEXT NOT NULL,
     imported_entity_id  TEXT NOT NULL,
     source_lattice_id   TEXT NOT NULL,
-    source_package_id   TEXT NOT NULL REFERENCES ep_transfer_packages(id),
+    source_package_id   TEXT NOT NULL,
     entity_type         TEXT NOT NULL,
     created_at          TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
