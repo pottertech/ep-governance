@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ep-governance.dev/schemas/audit-event.schema.json",
+  "title": "EP-Governance Audit Event",
+  "description": "Schema for an audit event in the append-only EP-Governance audit log, forming a hash chain.",
+  "type": "object",
+  "required": [
+    "id",
+    "lattice_id",
+    "sequence",
+    "event_type",
+    "event_data",
+    "previous_hash",
+    "event_hash",
+    "actor_principal_id",
+    "authenticated_caller_id",
+    "event_writer_id",
+    "created_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "Unique 20-char lowercase base32hex identifier for this audit event."
+    },
+    "lattice_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the lattice this audit event belongs to."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Sequence number of this event within the lattice audit log. Starts at 1."
+    },
+    "event_type": {
+      "type": "string",
+      "description": "Type of this audit event (e.g., transition_proposed, transition_authorized, policy_activated)."
+    },
+    "event_data": {
+      "type": "object",
+      "description": "Payload data for this audit event.",
+      "additionalProperties": true
+    },
+    "previous_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 hash of the previous audit event in the chain. Must be 64 zeros (0000000000000000000000000000000000000000000000000000000000000000) for the first event in the log."
+    },
+    "event_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 hash of this audit event's content."
+    },
+    "actor_principal_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the principal that is the actor for this event."
+    },
+    "authenticated_caller_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the authenticated caller that submitted this event."
+    },
+    "event_writer_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the event writer that recorded this event."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 UTC timestamp when this audit event was created."
+    }
+  }
+}

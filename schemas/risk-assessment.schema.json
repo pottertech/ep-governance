@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ep-governance.dev/schemas/risk-assessment.schema.json",
+  "title": "EP-Governance Risk Assessment",
+  "description": "Schema for a single risk-domain assessment evaluating the risk of a transition within a specific domain.",
+  "type": "object",
+  "required": [
+    "domain",
+    "risk_increment",
+    "inherent_risk",
+    "mitigation_credit",
+    "residual_risk",
+    "threshold",
+    "decision",
+    "accepted_by",
+    "accepted_at",
+    "expiration",
+    "mitigation"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "domain": {
+      "type": "string",
+      "enum": [
+        "production_database",
+        "external_communications",
+        "deployment",
+        "data_privacy",
+        "security"
+      ],
+      "description": "The risk domain being assessed."
+    },
+    "risk_increment": {
+      "type": "number",
+      "minimum": 0,
+      "description": "The incremental risk this transition adds to the domain."
+    },
+    "inherent_risk": {
+      "type": "number",
+      "minimum": 0,
+      "description": "The inherent risk score before any mitigation credit."
+    },
+    "mitigation_credit": {
+      "type": "number",
+      "minimum": 0,
+      "description": "The risk reduction credit from applicable mitigations."
+    },
+    "residual_risk": {
+      "type": "number",
+      "minimum": 0,
+      "description": "The residual risk score after applying mitigation credit (inherent_risk - mitigation_credit)."
+    },
+    "threshold": {
+      "type": "number",
+      "minimum": 0,
+      "description": "The risk threshold for this domain against which residual risk is compared."
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["deny", "require_approval", "warn", "allow"],
+      "description": "The risk decision based on comparing residual risk to the threshold."
+    },
+    "accepted_by": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the principal that accepted the risk. Null if not accepted."
+    },
+    "accepted_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 UTC timestamp of risk acceptance. Null if not accepted."
+    },
+    "expiration": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 UTC timestamp when this risk acceptance expires. Null if no expiration."
+    },
+    "mitigation": {
+      "type": "object",
+      "required": [
+        "evidence_type",
+        "evidence_uri",
+        "evidence_hash",
+        "verified_by",
+        "verified_at",
+        "expires_at",
+        "scope",
+        "credit"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "evidence_type": {
+          "type": "string",
+          "description": "Type of evidence supporting the mitigation (e.g., test_result, review_record, control_verification)."
+        },
+        "evidence_uri": {
+          "type": "string",
+          "description": "URI pointing to the evidence artifact."
+        },
+        "evidence_hash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "description": "SHA-256 hash of the evidence artifact, prefixed with 'sha256:'."
+        },
+        "verified_by": {
+          "type": "string",
+          "pattern": "^[0-9a-v]{20}$",
+          "description": "XID of the principal that verified the mitigation evidence."
+        },
+        "verified_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+          "description": "ISO 8601 UTC timestamp when the mitigation was verified."
+        },
+        "expires_at": {
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+          "description": "ISO 8601 UTC timestamp when the mitigation credit expires."
+        },
+        "scope": {
+          "type": "string",
+          "description": "Scope of the mitigation (e.g., specific resources, actions, or domains it applies to)."
+        },
+        "credit": {
+          "type": "number",
+          "minimum": 0,
+          "description": "The risk reduction credit granted by this mitigation."
+        }
+      }
+    }
+  }
+}

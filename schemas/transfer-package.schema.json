@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ep-governance.dev/schemas/transfer-package.schema.json",
+  "title": "EP-Governance Transfer Package",
+  "description": "Schema for a transfer package used to export and import lattice state between EP-Governance instances.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "package_version",
+    "source_lattice_id",
+    "source_project_id",
+    "snapshot_sequence",
+    "created_at",
+    "content_hash",
+    "signature",
+    "signer_id",
+    "trust_status",
+    "lattice_state"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "description": "Version of the transfer package schema."
+    },
+    "package_version": {
+      "type": "string",
+      "description": "Version of this transfer package instance."
+    },
+    "source_lattice_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the source lattice this package was exported from."
+    },
+    "source_project_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the source project this package was exported from."
+    },
+    "snapshot_sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Sequence number of this snapshot within the source lattice."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 UTC timestamp when this transfer package was created."
+    },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 hash of the package content, prefixed with 'sha256:'."
+    },
+    "signature": {
+      "type": "string",
+      "description": "Signature over the package content by the signer."
+    },
+    "signer_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the principal that signed this transfer package."
+    },
+    "trust_status": {
+      "type": "string",
+      "enum": ["trusted", "untrusted", "imported"],
+      "description": "Trust status of this transfer package."
+    },
+    "lattice_state": {
+      "type": "object",
+      "required": [
+        "nodes",
+        "edges",
+        "policies",
+        "risk_ledger",
+        "branch_heads",
+        "policy_versions"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Array of node objects in the lattice."
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Array of edge objects in the lattice."
+        },
+        "policies": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Array of policy objects in the lattice."
+        },
+        "risk_ledger": {
+          "type": "object",
+          "description": "Risk ledger state object.",
+          "additionalProperties": true
+        },
+        "branch_heads": {
+          "type": "object",
+          "description": "Object mapping branch XIDs to their current head node XIDs.",
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^[0-9a-v]{20}$"
+          },
+          "propertyNames": {
+            "pattern": "^[0-9a-v]{20}$"
+          }
+        },
+        "policy_versions": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Array of policy version records."
+        }
+      }
+    }
+  }
+}

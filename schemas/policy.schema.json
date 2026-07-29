@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ep-governance.dev/schemas/policy.schema.json",
+  "title": "EP-Governance Policy",
+  "description": "Schema for a governance policy that governs agent transitions within the EP-Governance lattice.",
+  "type": "object",
+  "required": [
+    "id",
+    "effect",
+    "actions",
+    "resources",
+    "conditions",
+    "priority",
+    "scope",
+    "agent_scope",
+    "description",
+    "status",
+    "created_by",
+    "approved_by",
+    "approved_at",
+    "activation_version",
+    "exception_to",
+    "valid_from",
+    "valid_until",
+    "justification"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "Unique 20-char lowercase base32hex identifier for this policy."
+    },
+    "effect": {
+      "type": "string",
+      "enum": ["deny", "require_approval", "warn", "allow"],
+      "description": "The effect this policy has when matched."
+    },
+    "actions": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "List of action strings this policy applies to."
+    },
+    "resources": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "List of resource strings this policy applies to."
+    },
+    "conditions": {
+      "type": "object",
+      "description": "Condition object evaluated to determine if the policy matches a transition."
+    },
+    "priority": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Priority of this policy. Higher values take precedence."
+    },
+    "scope": {
+      "type": "string",
+      "enum": ["global", "agent"],
+      "description": "Whether this policy is global or scoped to a specific agent."
+    },
+    "agent_scope": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "The agent this policy is scoped to. Must be null when scope=global, and a valid xid when scope=agent."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of the policy."
+    },
+    "status": {
+      "type": "string",
+      "enum": ["draft", "pending_approval", "active", "rejected", "superseded", "retired"],
+      "description": "Lifecycle status of this policy."
+    },
+    "created_by": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the principal that created this policy."
+    },
+    "approved_by": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the principal that approved this policy. Null if not yet approved."
+    },
+    "approved_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 UTC timestamp of approval. Null if not yet approved."
+    },
+    "activation_version": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "The lattice version at which this policy became active. Null if not yet active."
+    },
+    "exception_to": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[0-9a-v]{20}$"
+      },
+      "description": "List of policy XIDs that this policy is an exception to."
+    },
+    "valid_from": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 UTC timestamp from which this policy is valid. Null if always valid."
+    },
+    "valid_until": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 UTC timestamp until which this policy is valid. Null if no expiry."
+    },
+    "justification": {
+      "type": ["string", "null"],
+      "description": "Justification for this policy or exception. Null if not applicable."
+    }
+  }
+}

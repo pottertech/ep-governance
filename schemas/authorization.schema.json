@@ -1,0 +1,100 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ep-governance.dev/schemas/authorization.schema.json",
+  "title": "EP-Governance Authorization Token",
+  "description": "Schema for an authorization token issued by the EP-Governance lattice to authorize a transition for execution.",
+  "type": "object",
+  "required": [
+    "authorization_id",
+    "transition_id",
+    "agent_id",
+    "project_id",
+    "branch_id",
+    "proxy_audience",
+    "tool",
+    "payload_hash",
+    "policy_set_hash",
+    "matched_policy_versions",
+    "issued_at",
+    "expires_at",
+    "nonce",
+    "signature"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "authorization_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "Unique 20-char lowercase base32hex identifier for this authorization token."
+    },
+    "transition_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the transition this authorization token authorizes."
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the agent this authorization is issued to."
+    },
+    "project_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the project this authorization is scoped to."
+    },
+    "branch_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the branch this authorization is scoped to."
+    },
+    "proxy_audience": {
+      "type": "string",
+      "description": "The audience (e.g., proxy or executor) this token is intended for."
+    },
+    "tool": {
+      "type": "string",
+      "description": "Name of the tool this authorization permits."
+    },
+    "payload_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 hash of the authorized payload, prefixed with 'sha256:'."
+    },
+    "policy_set_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 hash of the policy set that was evaluated, prefixed with 'sha256:'."
+    },
+    "matched_policy_versions": {
+      "type": "object",
+      "description": "Object mapping matched policy XIDs to their version integers.",
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "propertyNames": {
+        "pattern": "^[0-9a-v]{20}$"
+      }
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 UTC timestamp when this authorization token was issued."
+    },
+    "expires_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 UTC timestamp when this authorization token expires."
+    },
+    "nonce": {
+      "type": "string",
+      "description": "Unique nonce to prevent token replay."
+    },
+    "signature": {
+      "type": "string",
+      "pattern": "^ed25519:[0-9a-f]+$",
+      "description": "Ed25519 signature over the token contents, prefixed with 'ed25519:'."
+    }
+  }
+}

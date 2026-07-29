@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ep-governance.dev/schemas/transition.schema.json",
+  "title": "EP-Governance Transition",
+  "description": "Schema for a transition record representing a proposed or completed state transition by an agent within the EP-Governance lattice.",
+  "type": "object",
+  "required": [
+    "id",
+    "stage",
+    "agent_id",
+    "branch_id",
+    "from_node_id",
+    "to_node_id",
+    "tool",
+    "arguments",
+    "payload_hash",
+    "classification",
+    "risk_assessments",
+    "residual_risk_after",
+    "verification_result",
+    "pulse_trace",
+    "matched_policies",
+    "expected_head_id",
+    "expected_version",
+    "idempotency_key",
+    "executor_id",
+    "execution_started_at",
+    "execution_completed_at",
+    "exit_status",
+    "result_summary",
+    "created_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "Unique 20-char lowercase base32hex identifier for this transition."
+    },
+    "stage": {
+      "type": "string",
+      "enum": [
+        "proposed",
+        "pending_approval",
+        "authorized",
+        "executing",
+        "succeeded",
+        "failed",
+        "execution_uncertain",
+        "cancelled",
+        "expired",
+        "denied"
+      ],
+      "description": "Current stage of this transition in its lifecycle."
+    },
+    "agent_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the agent proposing this transition."
+    },
+    "branch_id": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the branch this transition operates on."
+    },
+    "from_node_id": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the source node. Null for the first transition on a branch (root node creation)."
+    },
+    "to_node_id": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the target node. Should only be set when stage=succeeded."
+    },
+    "tool": {
+      "type": "string",
+      "description": "Name of the tool invoked by this transition."
+    },
+    "arguments": {
+      "type": "object",
+      "description": "Arguments passed to the tool."
+    },
+    "payload_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "SHA-256 hash of the transition payload, prefixed with 'sha256:'."
+    },
+    "classification": {
+      "type": "object",
+      "required": [
+        "action_type",
+        "canonical_resources",
+        "risk_domain",
+        "classification_method",
+        "classification_confidence",
+        "opaque",
+        "requires_approval"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "action_type": {
+          "type": "string",
+          "description": "The classified action type of this transition."
+        },
+        "canonical_resources": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Canonicalized resource identifiers affected by this transition."
+        },
+        "risk_domain": {
+          "type": "string",
+          "description": "The primary risk domain this transition falls under."
+        },
+        "classification_method": {
+          "type": "string",
+          "description": "Method used to classify this transition (e.g., rule_based, heuristic, model)."
+        },
+        "classification_confidence": {
+          "type": "string",
+          "enum": ["high", "medium", "low"],
+          "description": "Confidence level of the classification."
+        },
+        "opaque": {
+          "type": "boolean",
+          "description": "Whether the transition payload is opaque (cannot be inspected)."
+        },
+        "requires_approval": {
+          "type": "boolean",
+          "description": "Whether this transition requires approval based on classification."
+        }
+      }
+    },
+    "risk_assessments": {
+      "type": "object",
+      "description": "Object mapping risk domain names to risk assessment objects.",
+      "additionalProperties": {
+        "$ref": "https://ep-governance.dev/schemas/risk-assessment.schema.json"
+      }
+    },
+    "residual_risk_after": {
+      "type": ["object", "null"],
+      "description": "Object mapping risk domain names to residual risk numbers after mitigation. Null if not yet assessed.",
+      "additionalProperties": {
+        "type": "number"
+      }
+    },
+    "verification_result": {
+      "type": "string",
+      "enum": ["admissible", "denied", "pending_approval", "resource_exhausted"],
+      "description": "Result of verifying this transition against policies and risk thresholds."
+    },
+    "pulse_trace": {
+      "type": "object",
+      "description": "Trace of the policy evaluation pulse for this transition.",
+      "additionalProperties": true
+    },
+    "matched_policies": {
+      "type": "object",
+      "description": "Object describing the policies matched during evaluation.",
+      "additionalProperties": true
+    },
+    "expected_head_id": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the expected branch head node at the time of proposal. Null for the first transition."
+    },
+    "expected_version": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "description": "Expected lattice version at the time of proposal. Null if not applicable."
+    },
+    "idempotency_key": {
+      "type": "string",
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID-based idempotency key to prevent duplicate transition submissions."
+    },
+    "executor_id": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "XID of the executor that executed this transition. Null if not yet executed."
+    },
+    "execution_started_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 UTC timestamp when execution started. Null if not yet executed."
+    },
+    "execution_completed_at": {
+      "type": ["string", "null"],
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 UTC timestamp when execution completed. Null if not yet completed."
+    },
+    "exit_status": {
+      "type": ["string", "null"],
+      "enum": ["success", "failure", "timeout", null],
+      "description": "Exit status of execution. Null if not yet executed."
+    },
+    "result_summary": {
+      "type": ["string", "null"],
+      "description": "Summary of the execution result. Null if not yet executed."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?(Z|[+-]\\d{2}:\\d{2})$",
+      "description": "ISO 8601 UTC timestamp when this transition was created."
+    }
+  }
+}

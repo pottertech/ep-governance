@@ -1,0 +1,23 @@
+version: "3.9"
+
+services:
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: ep-governance-test-db
+    environment:
+      POSTGRES_USER: ep_test
+      POSTGRES_PASSWORD: ep_test_pw
+      POSTGRES_DB: ep_governance_test
+    ports:
+      - "5433:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ep_test -d ep_governance_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
