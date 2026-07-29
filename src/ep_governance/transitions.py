@@ -438,6 +438,10 @@ class TransitionEngine:
         # failure in any step rolls back the entire state change atomically
         # (Issue Critical 2).  transaction() requires a clean connection, so
         # commit any pending autobegun reads first (Issue High 6).
+        # Commit any autobegun read-only transaction from prior reads.
+        # These are this method's own reads (get_transition, find_pending),
+        # not caller-supplied mutations.  In production, use a dedicated
+        # fresh connection per top-level operation.
         if self.conn.in_transaction():
             self.conn.commit()
         with transaction(self.conn):
@@ -539,6 +543,10 @@ class TransitionEngine:
         # failure in any step rolls back the entire state change atomically
         # (Issue Critical 2).  transaction() requires a clean connection, so
         # commit any pending autobegun reads first (Issue High 6).
+        # Commit any autobegun read-only transaction from prior reads.
+        # These are this method's own reads (get_transition, find_pending),
+        # not caller-supplied mutations.  In production, use a dedicated
+        # fresh connection per top-level operation.
         if self.conn.in_transaction():
             self.conn.commit()
         with transaction(self.conn):
@@ -732,6 +740,10 @@ class TransitionEngine:
         # Issue High 6: transaction() now requires a clean connection (it no
         # longer silently commits pending autobegun work).  Commit any pending
         # reads so the connection is clean before we begin.
+        # Commit any autobegun read-only transaction from prior reads.
+        # These are this method's own reads (get_transition, find_pending),
+        # not caller-supplied mutations.  In production, use a dedicated
+        # fresh connection per top-level operation.
         if self.conn.in_transaction():
             self.conn.commit()
         with transaction(self.conn):
@@ -933,6 +945,10 @@ class TransitionEngine:
                         branch.get("lattice_id", branch_id) if branch is not None else branch_id
                     )
 
+                # Commit read-only operations before entering branch commit transaction
+                if self.conn.in_transaction():
+                    self.conn.commit()
+
                 try:
                     branch_committer.commit(
                         transition_id=transition_id,
@@ -1118,6 +1134,9 @@ class TransitionEngine:
                 authenticated_caller_id=actor_principal_id,
             )
         else:
+            # Commit any autobegun read-only transaction before standalone audit write
+            if self.conn.in_transaction():
+                self.conn.commit()
             self.audit.write_event(
                 lattice_id=lattice_id,
                 event_type=event_type,

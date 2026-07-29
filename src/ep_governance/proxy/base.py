@@ -183,10 +183,14 @@ class GovernedProxy(ABC):
         # adapter-specific payload constraints BEFORE claiming the token.  If
         # validation fails, the token is not consumed.
         #
-        # Issue High 6: serializable_transaction() requires a clean connection.
-        # The reads above (token verification, authorization lookup) may have
-        # autobegun a transaction. Commit those read-only operations to clean
-        # the connection. This is safe because the reads are non-mutating.
+        # The reads above (token verification, authorization lookup) are
+        # non-mutating operations that autobegin a SQLAlchemy transaction.
+        # Commit those reads to clean the connection before entering the
+        # serializable transaction.  This is safe because:
+        # 1. The proxy owns these reads — they are not caller-supplied work.
+        # 2. The reads are non-mutating (SELECT only).
+        # 3. No caller mutations can exist on this connection because the
+        #    proxy receives its own dedicated connection at construction.
         if self.conn.in_transaction():
             self.conn.commit()
         try:
@@ -395,6 +399,7 @@ class GovernedProxy(ABC):
                     current_head, current_version = branch_repo.get_head(
                         branch_id,
                     )
+                    # Commit read-only operations before entering branch commit transaction
                     commit_expected_head = (
                         expected_head_id if expected_head_id is not None else current_head
                     )
@@ -407,6 +412,9 @@ class GovernedProxy(ABC):
                     lattice_id = (
                         branch.get("lattice_id", branch_id) if branch is not None else branch_id
                     )
+                    # Commit all read-only operations before entering branch commit transaction
+                    if self.conn.in_transaction():
+                        self.conn.commit()
 
                     self.branch_committer.commit(
                         transition_id=token.transition_id,

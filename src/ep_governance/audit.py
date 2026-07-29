@@ -143,10 +143,8 @@ class AuditWriter:
 
         Returns the fully populated AuditEvent.
         """
-        # Require a clean connection — do not silently commit pending work.
-        # Clean any pending autobegun reads before entering the transaction.
-        if self.conn.in_transaction():
-            self.conn.commit()
+        # Requires a clean connection: TransactionOwnershipError is raised
+        # if the caller has pending work.  Use a dedicated fresh connection.
         with transaction(self.conn):
             return self.write_event_in_transaction(
                 lattice_id=lattice_id,

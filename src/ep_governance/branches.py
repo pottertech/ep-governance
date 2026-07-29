@@ -95,14 +95,13 @@ class BranchCommitter:
         """
         # All 9 steps run inside a single explicit transaction.  If any step
         # raises, the context manager rolls back and the transition stays at
-        # 'executing'.  On success it commits atomically.
+        # its original stage.  All reads (get_transition, get_head) are inside
+        # the transaction block — no pre-transaction reads that could
+        # autobegin a transaction.
         #
-        # Issue High 6: transaction() now requires a clean connection (it no
-        # Require a clean connection — do not silently commit pending work.
-        # Clean any pending autobegun reads before entering the transaction.
-        # This is safe — prior operations are non-mutating reads.
-        if self.conn.in_transaction():
-            self.conn.commit()
+        # Requires a clean connection: if the caller has pending work on this
+        # connection, TransactionOwnershipError is raised.  Use a dedicated
+        # fresh connection per top-level operation.
         with transaction(self.conn):
             # Step 1: Verify transition stage is 'executing'.
             # The stage advancement to 'succeeded' happens atomically inside
