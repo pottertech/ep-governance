@@ -61,8 +61,13 @@ class DockerProxy(GovernedProxy):
         conn: Any,
         auth_engine: Any,
         config: ProxyConfig,
+        transition_engine: Any | None = None,
+        branch_committer: Any | None = None,
+        policy_engine: Any | None = None,
     ) -> None:
-        super().__init__(conn, auth_engine, config)
+        super().__init__(
+            conn, auth_engine, config, transition_engine, branch_committer, policy_engine
+        )
 
     # ------------------------------------------------------------------ #
     # Command classification

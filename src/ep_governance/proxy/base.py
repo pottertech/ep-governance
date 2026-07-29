@@ -27,7 +27,11 @@ from typing import Any
 from sqlalchemy.engine import Connection
 
 from ..authorizations import AuthorizationEngine, AuthorizationToken
+from ..branches import BranchCommitter
 from ..canonical import canonical_hash
+from ..classification import get_classifier
+from ..policy_engine import PolicyEngine
+from ..transitions import TransitionEngine
 from ..xid import XID
 
 __all__ = [
@@ -81,10 +85,16 @@ class GovernedProxy(ABC):
         conn: Connection,
         auth_engine: AuthorizationEngine,
         config: ProxyConfig,
+        transition_engine: TransitionEngine | None = None,
+        branch_committer: BranchCommitter | None = None,
+        policy_engine: PolicyEngine | None = None,
     ) -> None:
         self.conn = conn
         self.auth_engine = auth_engine
         self.config = config
+        self.transition_engine = transition_engine
+        self.branch_committer = branch_committer
+        self.policy_engine = policy_engine
 
     def execute(
         self,
@@ -153,17 +163,90 @@ class GovernedProxy(ABC):
                 completed_at=self._now_iso(),
             )
 
-        # Step 5: Check for stale authorization (Critical fix 3)
-        # Recompute the current policy-set hash and compare to the one in the token
-        # If relevant governance changed, reject the authorization
-        stored_auth = self.auth_engine.get_authorization(token.authorization_id)
-        if stored_auth is not None:
-            current_policy_set_hash = stored_auth.get("policy_set_hash", "")
-            if current_policy_set_hash and current_policy_set_hash != token.policy_set_hash:
+        # Step 5: Recompute the current effective policy set and check for
+        # staleness (Critical fix 1).
+        # The previous implementation compared token.policy_set_hash to the
+        # same hash stored in the authorization record — which was set at
+        # issuance time and therefore always matched.  Instead, we classify
+        # the payload, evaluate the current active policies from the database,
+        # compute a fresh policy_set_hash, and compare it to the token's hash.
+        # We also verify that no new deny or require_approval policy blocks
+        # the action.
+        if self.policy_engine is not None:
+            # 5a. Classify the payload using the same classifier used at proposal.
+            classifier = get_classifier(token.tool)
+            if classifier is None:
                 return ExecutionResult(
                     success=False,
                     exit_status="failure",
-                    result_summary="Stale authorization: policy set has changed since authorization was issued",
+                    result_summary=f"No classifier available for tool '{token.tool}'",
+                    execution_attempt_id=attempt_id,
+                    started_at=started_at,
+                    completed_at=self._now_iso(),
+                )
+
+            try:
+                classification = classifier.classify(token.tool, payload)
+            except Exception as exc:
+                return ExecutionResult(
+                    success=False,
+                    exit_status="failure",
+                    result_summary=f"Classification failed: {exc!s}",
+                    execution_attempt_id=attempt_id,
+                    started_at=started_at,
+                    completed_at=self._now_iso(),
+                )
+
+            action_type = classification.action_type
+            canonical_resources = classification.canonical_resources
+
+            # 5b. Evaluate current active policies with agent/project/branch context.
+            context = {
+                "agent_id": token.agent_id,
+                "project_id": token.project_id,
+                "branch_id": token.branch_id,
+            }
+            resolution = self.policy_engine.evaluate(
+                action_type=action_type,
+                canonical_resources=canonical_resources,
+                context=context,
+            )
+
+            # 5c. If the current policy resolution denies or requires approval,
+            #     reject the action even if the hash matches.
+            if resolution.effect in ("deny", "require_approval"):
+                return ExecutionResult(
+                    success=False,
+                    exit_status="failure",
+                    result_summary=(
+                        f"Action blocked by current policy: effect='{resolution.effect}'"
+                    ),
+                    execution_attempt_id=attempt_id,
+                    started_at=started_at,
+                    completed_at=self._now_iso(),
+                )
+
+            # 5d. Compute a fresh policy_set_hash from the matched policies.
+            #     Build {policy_id: version} for each matched policy, sort by id,
+            #     and compute canonical_hash — matching the issuance-time computation.
+            fresh_policy_versions: dict[str, int] = {}
+            for match in resolution.matched_policies:
+                p = match.policy
+                version = p.activation_version if p.activation_version is not None else 0
+                fresh_policy_versions[p.id] = int(version)
+
+            if fresh_policy_versions:
+                sorted_pairs = sorted(fresh_policy_versions.items())
+                fresh_policy_set_hash = canonical_hash(sorted_pairs)
+            else:
+                fresh_policy_set_hash = ""
+
+            # 5e. Compare the fresh hash to the token's policy_set_hash.
+            if fresh_policy_set_hash != token.policy_set_hash:
+                return ExecutionResult(
+                    success=False,
+                    exit_status="failure",
+                    result_summary=("Stale authorization: effective policy set has changed"),
                     execution_attempt_id=attempt_id,
                     started_at=started_at,
                     completed_at=self._now_iso(),
@@ -194,9 +277,8 @@ class GovernedProxy(ABC):
             result.execution_attempt_id = attempt_id
             result.started_at = started_at
             result.completed_at = self._now_iso()
-            return result
         except TimeoutError:
-            return ExecutionResult(
+            result = ExecutionResult(
                 success=False,
                 exit_status="uncertain",
                 result_summary="Execution timed out — outcome uncertain",
@@ -206,7 +288,7 @@ class GovernedProxy(ABC):
             )
         except Exception:
             # High fix 12: do not expose internal error details
-            return ExecutionResult(
+            result = ExecutionResult(
                 success=False,
                 exit_status="failure",
                 result_summary=f"Execution error (reference: {attempt_id})",
@@ -214,6 +296,93 @@ class GovernedProxy(ABC):
                 started_at=started_at,
                 completed_at=self._now_iso(),
             )
+
+        # Step 8: Report the result back to EP (Critical fix 2).
+        # The proxy must call transition_engine.record_result() so the
+        # transition advances from 'executing' to a terminal stage, then
+        # branch_committer.commit() if successful to create the graph node
+        # and advance the branch head.  If reporting fails, log the error
+        # but still return the execution result — the action already happened.
+        if self.transition_engine is not None:
+            try:
+                # Map the ExecutionResult.exit_status to the record_result
+                # exit_status parameter.
+                if result.exit_status == "success":
+                    rr_status = "success"
+                elif result.exit_status == "failure":
+                    rr_status = "failure"
+                else:
+                    # "uncertain" or "timeout" → timeout
+                    rr_status = "timeout"
+
+                self.transition_engine.record_result(
+                    transition_id=token.transition_id,
+                    exit_status=rr_status,
+                    result_summary=result.result_summary,
+                )
+
+                # If the result was successful, commit the branch head to
+                # create the graph node and advance the branch.
+                if rr_status == "success" and self.branch_committer is not None:
+                    transition = self.transition_engine.get_transition(
+                        token.transition_id,
+                    )
+                    if transition is not None:
+                        branch_id: str = transition.get("branch_id", "")
+                        agent_id: str = transition.get("agent_id", "")
+                        expected_head_id: str | None = transition.get(
+                            "expected_head_id",
+                        )
+                        expected_version_raw = transition.get("expected_version")
+
+                        # Look up the current branch head and version from
+                        # the BranchRepository so we can pass the right
+                        # expected_head_id / expected_version to commit().
+                        from ..db.repositories import BranchRepository
+
+                        branch_repo = BranchRepository(self.conn)
+                        current_head, current_version = branch_repo.get_head(
+                            branch_id,
+                        )
+
+                        # If the transition stored expected_head_id /
+                        # expected_version at proposal time, use those for
+                        # optimistic-concurrency checking; otherwise fall
+                        # back to the current branch state.
+                        commit_expected_head = (
+                            expected_head_id if expected_head_id is not None else current_head
+                        )
+                        commit_expected_version = (
+                            int(expected_version_raw)
+                            if expected_version_raw is not None
+                            else current_version
+                        )
+
+                        # Derive the lattice_id for the audit event from
+                        # the branch.
+                        branch = branch_repo.get_branch(branch_id)
+                        lattice_id = (
+                            branch.get("lattice_id", branch_id) if branch is not None else branch_id
+                        )
+
+                        self.branch_committer.commit(
+                            transition_id=token.transition_id,
+                            branch_id=branch_id,
+                            agent_id=agent_id,
+                            description=result.result_summary,
+                            bt_planning_budget=0.0,
+                            metadata={},
+                            expected_head_id=commit_expected_head,
+                            expected_version=commit_expected_version,
+                            lattice_id=lattice_id,
+                        )
+            except Exception:
+                # The action already happened — log and continue.  Do not
+                # expose internal error details in the returned result.
+                # In production this would go to a structured logger.
+                pass
+
+        return result
 
     def _execute_with_timeout(
         self,

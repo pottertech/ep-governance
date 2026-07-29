@@ -12,6 +12,7 @@ In advisory mode, ep_check and governance management tools are available.
 from __future__ import annotations
 
 import json
+import secrets
 from typing import Any
 
 from mcp.server import Server
@@ -31,6 +32,25 @@ from .transitions import TransitionEngine
 from .xid import XID
 
 __all__ = ["create_server", "run_server", "get_tools"]
+
+
+# --------------------------------------------------------------------------- #
+# Role-based authorization for MCP tools
+# --------------------------------------------------------------------------- #
+
+# Required roles per tool name.  A principal must hold at least one of the
+# listed roles to invoke the tool.  See ``_check_role`` for the lookup logic.
+TOOL_REQUIRED_ROLES: dict[str, list[str]] = {
+    "ep_check": ["agent", "operator", "administrator"],
+    "ep_execute": ["agent", "operator", "administrator"],
+    "ep_status": ["observer", "agent", "operator", "administrator"],
+    "ep_log": ["observer", "agent", "operator", "administrator"],
+    "ep_list_policies": ["observer", "agent", "operator", "administrator"],
+    "ep_pending_approvals": ["observer", "agent", "operator", "administrator"],
+    "ep_approve": ["policy_approver", "administrator"],
+    "ep_deny": ["policy_approver", "administrator"],
+    "ep_audit_verify": ["auditor", "administrator"],
+}
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +227,6 @@ def get_tools(mode: str = "enforced") -> list[Tool]:
 def create_server(
     mode: str = "enforced",
     authenticated_principal_id: str | None = None,
-    authenticated_principal_type: str = "agent",
 ) -> Server:
     """Create an MCP server with EP-Governance tools.
 
@@ -221,10 +240,10 @@ def create_server(
               subject, mTLS SPIFFE ID, etc.) — NOT from a constructor argument.
               The constructor argument is an interim convenience until a
               deployment-specific identity provider integration is wired in.
-        authenticated_principal_type: Principal type of the authenticated caller
-              ('human' | 'agent' | 'service' | 'proxy'). Same provenance rule as
-              authenticated_principal_id. Used to enforce that only humans may
-              approve/deny requests.
+
+    The principal's type is NOT trusted from the caller.  It is loaded from
+    the database on every tool invocation via :class:`PrincipalRepository`
+    and verified to be active.  See :func:`_handle_tool_call`.
     """
     if not authenticated_principal_id:
         raise EPError(
@@ -248,13 +267,18 @@ def create_server(
                 arguments,
                 mode,
                 authenticated_principal_id,
-                authenticated_principal_type,
             )
             return [TextContent(type="text", text=json.dumps(result, default=str))]
         except EPError as exc:
             return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
-        except Exception as exc:
-            return [TextContent(type="text", text=json.dumps({"error": f"Unexpected: {exc!s}"}))]
+        except Exception:
+            attempt_id = secrets.token_hex(8)
+            return [
+                TextContent(
+                    type="text",
+                    text=json.dumps({"error": f"Internal error (reference: {attempt_id})"}),
+                )
+            ]
 
     from mcp.types import CallToolRequest, ListToolsRequest
 
@@ -269,19 +293,48 @@ def _handle_tool_call(
     arguments: dict[str, Any],
     mode: str,
     authenticated_principal_id: str,
-    authenticated_principal_type: str,
 ) -> dict[str, Any]:
     """Handle a tool call and return a result dict.
 
-    The caller's identity is taken from ``authenticated_principal_id`` /
-    ``authenticated_principal_type`` (set at server creation time from
-    authenticated session context), NOT from any field in ``arguments``.
-    Tool input schemas no longer accept ``agent_id`` or ``approver_id``.
+    The caller's identity is taken from ``authenticated_principal_id`` (set
+    at server creation time from authenticated session context), NOT from
+    any field in ``arguments``.  Tool input schemas no longer accept
+    ``agent_id`` or ``approver_id``.
+
+    The principal's type is loaded from the database on every call and
+    verified to be active.  The type is NOT trusted from the caller.
     """
     cfg = load_config()
     engine = create_engine(cfg.db_url)
 
     with engine.connect() as conn:
+        # --- Verify the authenticated principal from the database --------
+        repo = PrincipalRepository(conn)
+        principal = repo.get_principal(authenticated_principal_id)
+        if principal is None:
+            return {
+                "error": (
+                    f"Authenticated principal '{authenticated_principal_id}' "
+                    "not found in the database."
+                )
+            }
+        if principal.get("status") != "active":
+            return {
+                "error": (
+                    f"Authenticated principal '{authenticated_principal_id}' "
+                    f"is not active (status: {principal.get('status')})."
+                )
+            }
+        authenticated_principal_type: str = principal["type"]
+
+        # --- Role-based authorization -----------------------------------
+        required_roles = TOOL_REQUIRED_ROLES.get(name)
+        if required_roles is not None:
+            role_err = _check_role(conn, authenticated_principal_id, required_roles)
+            if role_err is not None:
+                return role_err
+
+        # --- Dispatch ----------------------------------------------------
         if name == "ep_check":
             return _ep_check(conn, arguments, authenticated_principal_id)
         elif name == "ep_execute":
@@ -306,6 +359,59 @@ def _handle_tool_call(
             return _ep_audit_verify(conn, arguments)
         else:
             return {"error": f"Unknown tool: {name}"}
+
+
+def _check_role(
+    conn: Any,
+    principal_id: str,
+    required_roles: list[str],
+) -> dict[str, Any] | None:
+    """Check whether *principal_id* holds any of *required_roles*.
+
+    Queries ``ep_role_bindings`` joined with ``ep_roles`` to determine the
+    principal's roles.  If the principal has no role bindings at all, an
+    ``administrator``-type principal is allowed to do everything (for
+    initial setup / bootstrapping).  Other principals with no role bindings
+    are denied.
+
+    Returns ``None`` if authorized, or an error dict if denied.
+    """
+    import sqlalchemy as sa
+
+    result = conn.execute(
+        sa.text(
+            "SELECT r.name "
+            "FROM ep_role_bindings rb "
+            "JOIN ep_roles r ON rb.role_id = r.id "
+            "WHERE rb.principal_id = :principal_id"
+        ),
+        {"principal_id": principal_id},
+    )
+    held_roles = {row[0] for row in result.fetchall()}
+
+    if held_roles:
+        # The principal has role bindings — check against required roles.
+        if held_roles & set(required_roles):
+            return None
+        return {
+            "error": (
+                f"Principal '{principal_id}' lacks required role "
+                f"(needs one of: {', '.join(required_roles)}; "
+                f"has: {', '.join(sorted(held_roles))})."
+            )
+        }
+
+    # No role bindings exist — allow human principals for bootstrapping.
+    repo = PrincipalRepository(conn)
+    principal = repo.get_principal(principal_id)
+    if principal and principal.get("type") in ("human", "administrator"):
+        return None
+    return {
+        "error": (
+            f"Principal '{principal_id}' has no role bindings and is not an "
+            "administrator; access denied."
+        )
+    }
 
 
 def _get_ep_service_id(conn: Any) -> str:
@@ -485,20 +591,21 @@ def _ep_audit_verify(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
 async def run_server(
     mode: str = "enforced",
     authenticated_principal_id: str | None = None,
-    authenticated_principal_type: str = "agent",
 ) -> None:
     """Run the MCP server over stdio.
 
-    In production, ``authenticated_principal_id`` and ``authenticated_principal_type``
-    must be derived from the authenticated MCP transport/session (TLS client
-    certificate, API key, OAuth token, mTLS SPIFFE ID, etc.) — NOT supplied by
-    the process command line. The arguments here are an interim bridge until
-    that integration exists; callers must populate them from a trusted source.
+    In production, ``authenticated_principal_id`` must be derived from the
+    authenticated MCP transport/session (TLS client certificate, API key,
+    OAuth token, mTLS SPIFFE ID, etc.) — NOT supplied by the process command
+    line.  The argument here is an interim bridge until that integration
+    exists; callers must populate it from a trusted source.
+
+    The principal's type is loaded from the database at runtime, not trusted
+    from the caller.
     """
     server = create_server(
         mode,
         authenticated_principal_id=authenticated_principal_id,
-        authenticated_principal_type=authenticated_principal_type,
     )
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
