@@ -182,6 +182,13 @@ class GovernedProxy(ABC):
         # Issue 5 (High 6 — prepare before claim): we also validate the
         # adapter-specific payload constraints BEFORE claiming the token.  If
         # validation fails, the token is not consumed.
+        #
+        # Issue High 6: serializable_transaction() now requires a clean
+        # connection (it no longer silently commits pending autobegun work).
+        # Commit any pending reads from token verification above so the
+        # connection is clean before we begin the serializable transaction.
+        if self.conn.in_transaction():
+            self.conn.commit()
         try:
             with serializable_transaction(self.conn):
                 # --- Step 5: Policy revalidation ----------------------------

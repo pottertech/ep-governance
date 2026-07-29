@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, Any
 from sqlalchemy import text
 
 from .canonical import canonical_json
+from .db.transactions import transaction
 from .errors import AuditWriteError
 from .xid import XID
 
@@ -129,130 +130,168 @@ class AuditWriter:
         actor_principal_id: str,
         authenticated_caller_id: str,
     ) -> AuditEvent:
-        """Write a single audit event atomically.
+        """Write a single audit event atomically (standalone).
 
-        Steps:
-          1. Begin a transaction (serialised per lattice).
-          2. Lock the ep_audit_heads row for this lattice.
-          3. Read last_sequence and last_hash.
-          4. Generate event_id (XID), next_sequence, created_at (UTC).
-          5. Build the canonical envelope and compute event_hash (SHA-256).
-          6. INSERT into ep_events.
-          7. UPDATE ep_audit_heads.
-          8. COMMIT.
+        This is a backward-compatible wrapper that owns its own transaction.
+        Callers that already hold a transaction (e.g. BranchCommitter.commit)
+        MUST call :meth:`write_event_in_transaction` instead to avoid
+        committing the outer transaction prematurely.
+
+        If SQLAlchemy has already autobegun a transaction (from prior reads
+        on this connection), it is committed first so that a clean explicit
+        transaction can be started.
+
+        Returns the fully populated AuditEvent.
+        """
+        # Commit any pending autobegun transaction so that transaction()
+        # can start a clean explicit one.  This is safe because this method
+        # explicitly takes ownership of the audit write.
+        if self.conn.in_transaction():
+            self.conn.commit()
+        with transaction(self.conn):
+            return self.write_event_in_transaction(
+                lattice_id=lattice_id,
+                event_type=event_type,
+                event_data=event_data,
+                actor_principal_id=actor_principal_id,
+                authenticated_caller_id=authenticated_caller_id,
+            )
+
+    def write_event_in_transaction(
+        self,
+        lattice_id: str,
+        event_type: str,
+        event_data: dict[str, Any],
+        actor_principal_id: str,
+        authenticated_caller_id: str,
+    ) -> AuditEvent:
+        """Write a single audit event **inside the caller's transaction**.
+
+        Unlike :meth:`write_event`, this method issues **no COMMIT or
+        ROLLBACK** — the caller owns the transaction and is responsible for
+        committing or rolling back.  This prevents the audit writer from
+        stealing transaction ownership from callers such as
+        :class:`BranchCommitter` that wrap the audit write in their own
+        transaction.
+
+        Steps (all within the caller's transaction):
+          1. Lock the ep_audit_heads row for this lattice
+             (``SELECT … FOR UPDATE`` on PostgreSQL; on SQLite the caller
+             is expected to have begun a write transaction such as
+             ``BEGIN IMMEDIATE`` — this method does **not** issue
+             ``BEGIN IMMEDIATE`` itself).
+          2. Read last_sequence and last_hash.
+          3. Generate event_id (XID), next_sequence, created_at (UTC).
+          4. Build the canonical envelope and compute event_hash (SHA-256).
+          5. INSERT into ep_events (append-only).
+          6. UPDATE ep_audit_heads.
+          7. Return the fully populated AuditEvent.
 
         Returns the fully populated AuditEvent.
         """
         conn = self.conn
         dialect = conn.dialect.name
 
-        # --- Begin serialised transaction --------------------------------
-        # SQLAlchemy auto-begins transactions; skip explicit BEGIN.
-        # For SQLite, serialization is handled by the connection's
-        # check_same_thread=False and WAL mode. For PostgreSQL, we use
-        # SELECT ... FOR UPDATE below.
-        try:
-            # 1. Lock the audit head and read current state
-            if dialect == "sqlite":
-                # SQLite: BEGIN IMMEDIATE already holds a write lock;
-                # no FOR UPDATE needed.
-                result = conn.execute(
-                    text(
-                        "SELECT last_sequence, last_hash "
-                        "FROM ep_audit_heads WHERE lattice_id = :lattice_id"
-                    ),
-                    {"lattice_id": lattice_id},
-                )
-            else:
-                # PostgreSQL: row-level lock.
-                result = conn.execute(
-                    text(
-                        "SELECT last_sequence, last_hash "
-                        "FROM ep_audit_heads WHERE lattice_id = :lattice_id "
-                        "FOR UPDATE"
-                    ),
-                    {"lattice_id": lattice_id},
-                )
-            row = result.fetchone()
-            if row is None:
-                raise AuditWriteError(
-                    f"No audit head found for lattice '{lattice_id}'. "
-                    "Ensure the audit head was initialised when the lattice was created."
-                )
+        # 1. Lock the audit head and read current state.
+        #    No explicit BEGIN/BEGIN IMMEDIATE here — the caller owns the
+        #    transaction.  On SQLite the caller's write transaction already
+        #    holds the write lock; on PostgreSQL we use SELECT … FOR UPDATE.
+        if dialect == "sqlite":
+            # SQLite: the caller's write transaction (e.g. BEGIN IMMEDIATE)
+            # already holds a write lock; no FOR UPDATE needed.
+            result = conn.execute(
+                text(
+                    "SELECT last_sequence, last_hash "
+                    "FROM ep_audit_heads WHERE lattice_id = :lattice_id"
+                ),
+                {"lattice_id": lattice_id},
+            )
+        else:
+            # PostgreSQL: row-level lock.
+            result = conn.execute(
+                text(
+                    "SELECT last_sequence, last_hash "
+                    "FROM ep_audit_heads WHERE lattice_id = :lattice_id "
+                    "FOR UPDATE"
+                ),
+                {"lattice_id": lattice_id},
+            )
+        row = result.fetchone()
+        if row is None:
+            raise AuditWriteError(
+                f"No audit head found for lattice '{lattice_id}'. "
+                "Ensure the audit head was initialised when the lattice was created."
+            )
 
-            last_sequence: int = row[0] if row[0] is not None else 0
-            last_hash: str = row[1] if row[1] is not None else GENESIS_HASH
+        last_sequence: int = row[0] if row[0] is not None else 0
+        last_hash: str = row[1] if row[1] is not None else GENESIS_HASH
 
-            # 2. Generate event metadata (trusted EP service only)
-            event_id = str(XID.new())
-            next_sequence = last_sequence + 1
-            created_at = _utc_now_iso()
+        # 2. Generate event metadata (trusted EP service only)
+        event_id = str(XID.new())
+        next_sequence = last_sequence + 1
+        created_at = _utc_now_iso()
 
-            # 3. Build canonical envelope and compute hash
-            # High fix 8: hash must cover ALL immutable identity fields,
-            # not just sequence/event_id/event_type/data/principal/created_at/previous_hash.
-            # Include lattice_id, authenticated_caller_id, and event_writer_id.
-            envelope: dict[str, Any] = {
-                "sequence": next_sequence,
-                "event_id": event_id,
+        # 3. Build canonical envelope and compute hash.
+        #    The envelope must include ALL immutable identity fields
+        #    (lattice_id, authenticated_caller_id, event_writer_id) to
+        #    prevent tampering without breaking the hash chain.
+        envelope: dict[str, Any] = {
+            "sequence": next_sequence,
+            "event_id": event_id,
+            "lattice_id": lattice_id,
+            "event_type": event_type,
+            "event_data": event_data,
+            "actor_principal_id": actor_principal_id,
+            "authenticated_caller_id": authenticated_caller_id,
+            "event_writer_id": self.ep_service_principal_id,
+            "created_at": created_at,
+            "previous_hash": last_hash,
+        }
+        event_hash = hashlib.sha256(canonical_json(envelope).encode("utf-8")).hexdigest()
+
+        # 4. INSERT into ep_events (append-only)
+        conn.execute(
+            text(
+                "INSERT INTO ep_events "
+                "(id, lattice_id, sequence, event_type, event_data, "
+                " previous_hash, event_hash, actor_principal_id, "
+                " authenticated_caller_id, event_writer_id, created_at) "
+                "VALUES "
+                "(:id, :lattice_id, :sequence, :event_type, :event_data, "
+                " :previous_hash, :event_hash, :actor_principal_id, "
+                " :authenticated_caller_id, :event_writer_id, :created_at)"
+            ),
+            {
+                "id": event_id,
                 "lattice_id": lattice_id,
+                "sequence": next_sequence,
                 "event_type": event_type,
-                "event_data": event_data,
+                "event_data": _dump_json(event_data),
+                "previous_hash": last_hash,
+                "event_hash": event_hash,
                 "actor_principal_id": actor_principal_id,
                 "authenticated_caller_id": authenticated_caller_id,
                 "event_writer_id": self.ep_service_principal_id,
                 "created_at": created_at,
-                "previous_hash": last_hash,
-            }
-            event_hash = hashlib.sha256(canonical_json(envelope).encode("utf-8")).hexdigest()
+            },
+        )
 
-            # 4. INSERT into ep_events (append-only)
-            conn.execute(
-                text(
-                    "INSERT INTO ep_events "
-                    "(id, lattice_id, sequence, event_type, event_data, "
-                    " previous_hash, event_hash, actor_principal_id, "
-                    " authenticated_caller_id, event_writer_id, created_at) "
-                    "VALUES "
-                    "(:id, :lattice_id, :sequence, :event_type, :event_data, "
-                    " :previous_hash, :event_hash, :actor_principal_id, "
-                    " :authenticated_caller_id, :event_writer_id, :created_at)"
-                ),
-                {
-                    "id": event_id,
-                    "lattice_id": lattice_id,
-                    "sequence": next_sequence,
-                    "event_type": event_type,
-                    "event_data": _dump_json(event_data),
-                    "previous_hash": last_hash,
-                    "event_hash": event_hash,
-                    "actor_principal_id": actor_principal_id,
-                    "authenticated_caller_id": authenticated_caller_id,
-                    "event_writer_id": self.ep_service_principal_id,
-                    "created_at": created_at,
-                },
-            )
+        # 5. UPDATE ep_audit_heads
+        conn.execute(
+            text(
+                "UPDATE ep_audit_heads "
+                "SET last_sequence = :last_sequence, last_hash = :last_hash "
+                "WHERE lattice_id = :lattice_id"
+            ),
+            {
+                "last_sequence": next_sequence,
+                "last_hash": event_hash,
+                "lattice_id": lattice_id,
+            },
+        )
 
-            # 5. UPDATE ep_audit_heads
-            conn.execute(
-                text(
-                    "UPDATE ep_audit_heads "
-                    "SET last_sequence = :last_sequence, last_hash = :last_hash "
-                    "WHERE lattice_id = :lattice_id"
-                ),
-                {
-                    "last_sequence": next_sequence,
-                    "last_hash": event_hash,
-                    "lattice_id": lattice_id,
-                },
-            )
-
-            conn.execute(text("COMMIT"))
-        except Exception:
-            conn.execute(text("ROLLBACK"))
-            raise
-
-        # 6. Return the fully populated AuditEvent
+        # 6. Return the fully populated AuditEvent.
+        #    No COMMIT/ROLLBACK — the caller owns the transaction.
         return AuditEvent(
             id=event_id,
             lattice_id=lattice_id,

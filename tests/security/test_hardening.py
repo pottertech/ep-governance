@@ -177,7 +177,7 @@ class TestConcurrencyStress:
         lattice_id = setup["lattice"]["id"]
         head_id, version = BranchRepository(conn).get_head(branch_id)
 
-        # Create two succeeded transitions
+        # Create two transitions in 'executing' stage
         trans_repo = TransitionRepository(conn)
         t1 = trans_repo.insert_transition(
             {
@@ -187,7 +187,7 @@ class TestConcurrencyStress:
                 "tool": "test",
                 "payload_hash": "sha256:" + "a" * 64,
                 "idempotency_key": str(XID.new()),
-                "stage": "succeeded",
+                "stage": "executing",
             }
         )
         t2 = trans_repo.insert_transition(
@@ -198,7 +198,7 @@ class TestConcurrencyStress:
                 "tool": "test",
                 "payload_hash": "sha256:" + "b" * 64,
                 "idempotency_key": str(XID.new()),
-                "stage": "succeeded",
+                "stage": "executing",
             }
         )
         conn.commit()

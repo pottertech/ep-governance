@@ -25,6 +25,9 @@ from ep_governance.errors import (
     AuditChainError,
     TransferError,
     XIDError,
+    DatabaseError,
+    ConcurrencyError,
+    TransactionOwnershipError,
 )
 
 
@@ -51,6 +54,9 @@ class TestErrorHierarchy:
             AuditChainError,
             TransferError,
             XIDError,
+            DatabaseError,
+            ConcurrencyError,
+            TransactionOwnershipError,
         ],
     )
     def test_all_errors_derive_from_eperror(self, err_class):
@@ -70,6 +76,10 @@ class TestErrorHierarchy:
 
     def test_audit_errors_derive_from_audit_error(self):
         assert issubclass(AuditChainError, AuditError)
+
+    def test_database_errors_derive_from_database_error(self):
+        assert issubclass(ConcurrencyError, DatabaseError)
+        assert issubclass(TransactionOwnershipError, DatabaseError)
 
     def test_can_raise_and_catch_base(self):
         with pytest.raises(EPError):

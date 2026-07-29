@@ -212,10 +212,10 @@ class PostgresProxy(GovernedProxy):
                 if self.target_engine.dialect.name != "sqlite":
                     target_conn.execute(
                         sa.text(
-                            f"SET LOCAL statement_timeout = '{self.config.timeout_seconds * 1000}'"
+                            f"SET LOCAL statement_timeout = '{self.config.timeout_seconds * 1000}ms'"
                         )
                     )
-                    target_conn.execute(sa.text("SET LOCAL lock_timeout = '5000'"))
+                    target_conn.execute(sa.text("SET LOCAL lock_timeout = '5s'"))
 
                 if operation == "select":
                     # High fix 11: bound result set to prevent memory exhaustion

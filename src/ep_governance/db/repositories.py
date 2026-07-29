@@ -873,26 +873,52 @@ class ApprovalRepository(Repository):
         row = result.fetchone()
         return _row_to_dict(row) if row else None
 
+    def find_pending_by_transition(self, transition_id: str) -> dict[str, Any] | None:
+        """Return the pending approval request for *transition_id*, or None.
+
+        Queries ``ep_approval_requests`` for the most recent row matching
+        ``transition_id = :transition_id AND status = 'pending'``.  At most one
+        pending request is expected per transition (enforced by the approval
+        workflow); the query orders by ``created_at DESC`` as a tie-breaker
+        for defensive robustness.
+        """
+        result = self.conn.execute(
+            text(
+                "SELECT * FROM ep_approval_requests "
+                "WHERE transition_id = :transition_id AND status = 'pending' "
+                "ORDER BY created_at DESC LIMIT 1"
+            ),
+            {"transition_id": transition_id},
+        )
+        row = result.fetchone()
+        return _row_to_dict(row) if row else None
+
     def decide(
         self,
         request_id: str,
         decided_by: str,
         decision: str,
         reason: str,
-    ) -> dict[str, Any]:
+    ) -> dict[str, Any] | None:
         """Record an approval decision and return the updated row.
 
         ``decision`` should be 'approved' or 'denied'.
+
+        The UPDATE is guarded by ``AND status = 'pending'`` so that two
+        concurrent approvers cannot both decide the same request (Issue
+        Critical 3).  If no row is updated (the request was already decided
+        or does not exist), ``None`` is returned so the caller can detect
+        the race and act accordingly.
         """
         now = _now_iso()
         status = "approved" if decision == "approved" else "denied"
-        self.conn.execute(
+        result = self.conn.execute(
             text(
                 "UPDATE ep_approval_requests "
                 "SET decided_by = :decided_by, decided_at = :decided_at, "
                 "    decision = :decision, reason = :reason, status = :status, "
                 "    updated_at = :now "
-                "WHERE id = :id"
+                "WHERE id = :id AND status = 'pending'"
             ),
             {
                 "id": request_id,
@@ -904,6 +930,8 @@ class ApprovalRepository(Repository):
                 "now": now,
             },
         )
+        if result.rowcount == 0:
+            return None
         return self.get_request(request_id)
 
 

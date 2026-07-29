@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy import text
 
+from ..errors import TransactionOwnershipError
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -38,13 +40,16 @@ __all__ = [
 def transaction(conn: Connection) -> Iterator[Connection]:
     """Begin a transaction, yield the connection, commit on success, rollback on exception.
 
-    Handles SQLAlchemy 2.0's autobegin behavior by committing any pending
-    autobegun transaction before starting an explicit one.
+    Requires a clean connection: if SQLAlchemy has already autobegun a
+    transaction (from prior reads), the caller must commit it before entering
+    this context manager.  A pending transaction is NOT silently committed —
+    doing so would let a context manager decide the fate of work it does not
+    own (Issue High 6).  Instead, ``TransactionOwnershipError`` is raised.
     """
-    # If SQLAlchemy has already autobegun a transaction (from prior reads),
-    # commit it first so we can start a clean explicit transaction.
     if conn.in_transaction():
-        conn.commit()
+        raise TransactionOwnershipError(
+            "A clean connection is required; the current connection has a pending transaction"
+        )
     trans = conn.begin()
     try:
         yield conn
@@ -64,30 +69,25 @@ def serializable_transaction(conn: Connection) -> Iterator[Connection]:
 
     Uses SQLAlchemy's conn.begin() and SET TRANSACTION ISOLATION LEVEL
     for PostgreSQL. For SQLite, uses BEGIN IMMEDIATE.
+
+    Requires a clean connection (see :func:`transaction`); a pending
+    transaction raises ``TransactionOwnershipError`` instead of being
+    silently committed (Issue High 6).
     """
     dialect = conn.dialect.name
-    # Commit any pending autobegun transaction first
     if conn.in_transaction():
-        conn.commit()
+        raise TransactionOwnershipError(
+            "A clean connection is required; the current connection has a pending transaction"
+        )
     if dialect == "sqlite":
-        # SQLite: use BEGIN IMMEDIATE to acquire a write lock immediately
-        # Only if not already in a transaction
-        if not conn.in_transaction():
-            conn.execute(text("BEGIN IMMEDIATE"))
-            try:
-                yield conn
-                conn.execute(text("COMMIT"))
-            except Exception:
-                conn.execute(text("ROLLBACK"))
-                raise
-        else:
-            trans = conn.begin()
-            try:
-                yield conn
-                trans.commit()
-            except Exception:
-                trans.rollback()
-                raise
+        # SQLite: use BEGIN IMMEDIATE to acquire a write lock immediately.
+        conn.execute(text("BEGIN IMMEDIATE"))
+        try:
+            yield conn
+            conn.execute(text("COMMIT"))
+        except Exception:
+            conn.execute(text("ROLLBACK"))
+            raise
     else:
         # PostgreSQL: use SQLAlchemy begin() with isolation level
         trans = conn.begin()

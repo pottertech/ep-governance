@@ -200,6 +200,17 @@ class ConcurrencyError(DatabaseError):
     """A database concurrency conflict occurred."""
 
 
+class TransactionOwnershipError(DatabaseError):
+    """A transaction context manager was entered while the connection already
+    had a pending (autobegun or explicit) transaction.
+
+    The ``transaction()`` / ``serializable_transaction()`` helpers require a
+    clean connection so that the caller's pending work is not silently
+    committed or rolled back by the context manager.  Callers must commit (or
+    roll back) any open transaction before entering these helpers.
+    """
+
+
 # ---------------------------------------------------------------------------
 # XID
 # ---------------------------------------------------------------------------

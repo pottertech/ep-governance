@@ -461,7 +461,7 @@ class TestBranchCommit:
         assert head_id == initial_node["id"]
         assert version == 2
 
-        # Create a transition that succeeded
+        # Create a transition in 'executing' stage
         trans_repo = TransitionRepository(conn)
         trans1 = trans_repo.insert_transition(
             {
@@ -471,7 +471,7 @@ class TestBranchCommit:
                 "tool": "postgres.execute",
                 "payload_hash": "sha256:" + "a" * 64,
                 "idempotency_key": str(XID.new()),
-                "stage": "succeeded",
+                "stage": "executing",
             }
         )
         conn.commit()
@@ -501,7 +501,7 @@ class TestBranchCommit:
                 "tool": "postgres.execute",
                 "payload_hash": "sha256:" + "b" * 64,
                 "idempotency_key": str(XID.new()),
-                "stage": "succeeded",
+                "stage": "executing",
             }
         )
         conn.commit()
