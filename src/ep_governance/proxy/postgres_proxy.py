@@ -155,17 +155,20 @@ class PostgresProxy(GovernedProxy):
         try:
             with self.target_engine.connect() as target_conn:
                 if operation == "select":
+                    # High fix 11: bound result set to prevent memory exhaustion
                     result = target_conn.execute(sa.text(sql))
-                    rows = result.fetchall()
-                    columns = list(result.keys()) if rows else []
+                    rows = result.fetchmany(1000)  # cap at 1000 rows
                     output = [dict(row._mapping) for row in rows]
                     target_conn.commit()
+                    # Redact output before returning
+                    output_str = self._redact(str(output))
                     return ExecutionResult(
                         success=True,
                         exit_status="success",
                         result_summary=f"SELECT returned {len(rows)} rows",
                         rows_affected=len(rows),
-                        output=self._enforce_output_limit(str(output)),
+                        output=self._enforce_output_limit(output_str),
+                        redacted=True,
                     )
                 else:
                     result = target_conn.execute(sa.text(sql))
@@ -176,11 +179,12 @@ class PostgresProxy(GovernedProxy):
                         result_summary=f"{operation.upper()} affected {result.rowcount} rows",
                         rows_affected=result.rowcount,
                     )
-        except Exception as exc:
+        except Exception:
+            # High fix 12: do not expose database error details
             return ExecutionResult(
                 success=False,
                 exit_status="failure",
-                result_summary=f"SQL execution error: {exc!s}",
+                result_summary="SQL execution failed (check internal logs for details)",
             )
 
     def close(self) -> None:

@@ -391,6 +391,18 @@ class AuthorizationEngine:
         return token
 
     # ------------------------------------------------------------------ #
+    # Lookup
+    # ------------------------------------------------------------------ #
+
+    def get_authorization(self, authorization_id: str) -> dict[str, Any] | None:
+        """Return the stored authorization record by ID, or None.
+
+        Delegates to :meth:`AuthorizationRepository.get_authorization`.
+        """
+        auth_repo = AuthorizationRepository(self.conn)
+        return auth_repo.get_authorization(authorization_id)
+
+    # ------------------------------------------------------------------ #
     # Verification + atomic claim
     # ------------------------------------------------------------------ #
 
@@ -407,12 +419,24 @@ class AuthorizationEngine:
         This is the proxy-side entry point.  The proxy:
           1. Parses and verifies the token signature using the EP public key.
           2. Confirms the payload hash matches the authorized one.
-          3. Atomically claims the authorization (exactly-once semantics).
-          4. Advances the transition to ``'executing'``.
-          5. Returns a dict with the claimed authorization + execution attempt ID.
+          3. Computes the SHA-256 hash of the presented signed token and
+             compares it to the ``token_hash`` stored in the database
+             authorization record (EP-AUTH-008).  If they differ, the token
+             is rejected even if the signature is valid.
+          4. Atomically claims the authorization (exactly-once semantics),
+             binding the presented ``token_hash`` into the atomic UPDATE WHERE
+             clause (EP-AUTH-009/010).
+          5. Advances the transition to ``'executing'`` with a stage guard
+             (``WHERE stage = 'authorized'``).  The claim and transition
+             advancement occur in a single SAVEPOINT transaction; if the
+             advancement fails the claim is rolled back.
+          6. Generates and persists an ``execution_attempt_id`` on the
+             authorization record.
+          7. Returns a dict with the claimed authorization + execution attempt ID.
 
-        If any step fails (bad signature, payload mismatch, already used,
-        expired, not found), returns ``None``.
+        If any step fails (bad signature, payload mismatch, token-hash mismatch,
+        already used, expired, not found, transition not in 'authorized'
+        stage), returns ``None``.
 
         Args:
             authorization_id:    The XID of the authorization to claim.
@@ -453,23 +477,69 @@ class AuthorizationEngine:
         if token_data.get("authorization_id") != authorization_id:
             return None
 
-        # 5. Atomically claim the authorization.
+        # 5. Compute SHA-256 of the presented signed_token and compare to the
+        #    stored token_hash in the database.  This binds the presented token
+        #    to the database record, preventing a validly-signed token from being
+        #    used if the record has a different token_hash.
+        presented_token_hash = hashlib.sha256(signed_token.encode("utf-8")).hexdigest()
+
         auth_repo = AuthorizationRepository(self.conn)
-        claimed = auth_repo.claim_authorization(authorization_id, proxy_principal_id)
-        if claimed is None:
+        stored_auth = auth_repo.get_authorization(authorization_id)
+        if stored_auth is None:
+            return None
+        stored_token_hash = stored_auth.get("token_hash", "")
+        if not stored_token_hash or presented_token_hash != stored_token_hash:
             return None
 
-        # 6. Advance the transition to 'executing'.
-        transition_repo = TransitionRepository(self.conn)
-        transition_id = claimed.get("transition_id", "")
-        if transition_id:
-            transition_repo.update_stage(transition_id, "executing")
-
-        # 7. Generate execution attempt ID and return the result.
+        # 6. Generate the execution_attempt_id up front so it can be stored on
+        #    the authorization record within the same transaction as the claim.
         execution_attempt_id = str(XID.new())
+
+        # 7. Atomically claim the authorization and advance the transition in a
+        #    single transaction (SAVEPOINT).  If the transition advancement
+        #    fails, the claim is rolled back so the authorization is not left
+        #    marked as used.
+        transition_repo = TransitionRepository(self.conn)
+        savepoint = self.conn.begin_nested()
+        try:
+            claimed = auth_repo.claim_authorization(
+                authorization_id,
+                proxy_principal_id,
+                token_hash=presented_token_hash,
+            )
+            if claimed is None:
+                savepoint.rollback()
+                return None
+
+            # Persist the execution_attempt_id on the authorization record.
+            auth_repo.update_execution_attempt_id(authorization_id, execution_attempt_id)
+
+            # Advance the transition to 'executing', guarding that the current
+            #    stage is 'authorized'.  If this fails, roll back the claim.
+            transition_id = claimed.get("transition_id", "")
+            if transition_id:
+                ok = transition_repo.update_stage(
+                    transition_id,
+                    "executing",
+                    expected_current_stage="authorized",
+                )
+                if not ok:
+                    savepoint.rollback()
+                    return None
+            else:
+                # No transition to advance — cannot safely proceed.
+                savepoint.rollback()
+                return None
+
+            savepoint.commit()
+        except Exception:
+            savepoint.rollback()
+            raise
+
+        # 8. Build and return the result dict.
         result: dict[str, Any] = {
             "authorization_id": authorization_id,
-            "transition_id": transition_id,
+            "transition_id": claimed.get("transition_id", ""),
             "execution_attempt_id": execution_attempt_id,
             "payload_hash": claimed.get("payload_hash", payload_hash),
             "policy_set_hash": claimed.get("policy_set_hash", ""),

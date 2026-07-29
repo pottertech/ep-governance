@@ -602,13 +602,31 @@ class TransitionRepository(Repository):
                 d[col] = _json_loads(d[col])
         return d
 
-    def update_stage(self, transition_id: str, stage: str) -> bool:
-        """Update a transition's stage. Returns True if a row was affected."""
+    def update_stage(
+        self,
+        transition_id: str,
+        stage: str,
+        expected_current_stage: str | None = None,
+    ) -> bool:
+        """Update a transition's stage. Returns True if a row was affected.
+
+        When *expected_current_stage* is provided, the UPDATE only succeeds
+        if the row's current stage matches that value (optimistic stage guard).
+        This is used when advancing to ``'executing'`` to ensure the transition
+        is currently in the ``'authorized'`` stage.  When *None*, the current
+        behavior (no stage guard) is preserved.
+        """
         now = _now_iso()
-        result = self.conn.execute(
-            text("UPDATE ep_transitions SET stage = :stage, updated_at = :now WHERE id = :id"),
-            {"id": transition_id, "stage": stage, "now": now},
-        )
+        params: dict[str, Any] = {"id": transition_id, "stage": stage, "now": now}
+        if expected_current_stage is not None:
+            sql = (
+                "UPDATE ep_transitions SET stage = :stage, updated_at = :now "
+                "WHERE id = :id AND stage = :expected_current_stage"
+            )
+            params["expected_current_stage"] = expected_current_stage
+        else:
+            sql = "UPDATE ep_transitions SET stage = :stage, updated_at = :now WHERE id = :id"
+        result = self.conn.execute(text(sql), params)
         return result.rowcount == 1
 
     def update_result(
@@ -699,12 +717,22 @@ class AuthorizationRepository(Repository):
             d["matched_policy_versions"] = _json_loads(d["matched_policy_versions"])
         return d
 
-    def claim_authorization(self, auth_id: str, proxy_principal_id: str) -> dict[str, Any] | None:
+    def claim_authorization(
+        self,
+        auth_id: str,
+        proxy_principal_id: str,
+        token_hash: str | None = None,
+    ) -> dict[str, Any] | None:
         """Atomically claim an authorization token.
 
         Uses ``UPDATE ... WHERE used = FALSE AND expires_at > NOW() RETURNING ...``
         to ensure exactly-once claim semantics.  Returns the claimed row as a
         dict, or None if the token was already used, expired, or not found.
+
+        When *token_hash* is provided, an additional ``AND token_hash = :token_hash``
+        guard is added to the WHERE clause, binding the presented token to the
+        stored record.  This prevents a validly-signed token from being used if
+        the database record has a different ``token_hash``.
 
         On PostgreSQL, ``NOW()`` resolves to the server's transaction timestamp.
         On SQLite, we pass the current UTC timestamp as a parameter.
@@ -712,33 +740,61 @@ class AuthorizationRepository(Repository):
         dialect = self.conn.dialect.name
         now = _now_iso()
 
+        token_hash_clause = " AND token_hash = :token_hash" if token_hash is not None else ""
+
         if dialect == "sqlite":
             # SQLite does not have NOW(); use a parameter.
+            params: dict[str, Any] = {"id": auth_id, "now": now, "now2": now}
+            if token_hash is not None:
+                params["token_hash"] = token_hash
             result = self.conn.execute(
                 text(
                     "UPDATE ep_authorizations "
                     "SET used = TRUE, used_at = :now "
-                    "WHERE id = :id AND used = FALSE AND expires_at > :now2 "
+                    "WHERE id = :id AND used = FALSE AND expires_at > :now2"
+                    f"{token_hash_clause} "
                     "RETURNING id, transition_id, payload_hash, policy_set_hash"
                 ),
-                {"id": auth_id, "now": now, "now2": now},
+                params,
             )
         else:
             # PostgreSQL: use NOW() server-side.
+            params_pg: dict[str, Any] = {"id": auth_id}
+            if token_hash is not None:
+                params_pg["token_hash"] = token_hash
             result = self.conn.execute(
                 text(
                     "UPDATE ep_authorizations "
                     "SET used = TRUE, used_at = NOW() "
-                    "WHERE id = :id AND used = FALSE AND expires_at > NOW() "
+                    "WHERE id = :id AND used = FALSE AND expires_at > NOW()"
+                    f"{token_hash_clause} "
                     "RETURNING id, transition_id, payload_hash, policy_set_hash"
                 ),
-                {"id": auth_id},
+                params_pg,
             )
         row = result.fetchone()
         if row is None:
             return None
         d = _row_to_dict(row)
         return d
+
+    def update_execution_attempt_id(self, auth_id: str, execution_attempt_id: str) -> bool:
+        """Store the execution_attempt_id on an authorization record.
+
+        Returns True if a row was affected.  This is used by
+        :meth:`AuthorizationEngine.verify_and_claim` to persist the attempt ID
+        generated at claim time so that callbacks can be correlated back to the
+        authorization.
+        """
+        result = self.conn.execute(
+            text(
+                "UPDATE ep_authorizations "
+                "SET execution_attempt_id = :execution_attempt_id "
+                "WHERE id = :id"
+            ),
+            {"id": auth_id, "execution_attempt_id": execution_attempt_id},
+        )
+        return result.rowcount == 1
 
     def check_stale(self, auth_id: str) -> bool:
         """Check if the authorization is stale (policy set changed).

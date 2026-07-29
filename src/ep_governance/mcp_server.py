@@ -47,9 +47,10 @@ ADVISORY_TOOLS: list[Tool] = [
                 "tool": {"type": "string", "description": "Tool name (e.g. postgres.execute)"},
                 "arguments": {"type": "object", "description": "Tool arguments as JSON"},
                 "branch_id": {"type": "string", "description": "Branch XID"},
-                "agent_id": {"type": "string", "description": "Agent principal XID"},
+                # agent_id is no longer caller-supplied; it is derived from the
+                # authenticated MCP session principal (see create_server).
             },
-            "required": ["tool", "arguments", "agent_id"],
+            "required": ["tool", "arguments"],
         },
     ),
     Tool(
@@ -94,10 +95,11 @@ ADVISORY_TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "approval_id": {"type": "string", "description": "Approval request XID"},
-                "approver_id": {"type": "string", "description": "Approver principal XID"},
+                # approver_id is no longer caller-supplied; it is derived from
+                # the authenticated MCP session principal (see create_server).
                 "reason": {"type": "string", "description": "Approval reason"},
             },
-            "required": ["approval_id", "approver_id"],
+            "required": ["approval_id"],
         },
     ),
     Tool(
@@ -107,10 +109,11 @@ ADVISORY_TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "approval_id": {"type": "string", "description": "Approval request XID"},
-                "approver_id": {"type": "string", "description": "Approver principal XID"},
+                # approver_id is no longer caller-supplied; it is derived from
+                # the authenticated MCP session principal (see create_server).
                 "reason": {"type": "string", "description": "Denial reason"},
             },
-            "required": ["approval_id", "approver_id"],
+            "required": ["approval_id"],
         },
     ),
     Tool(
@@ -137,9 +140,10 @@ ENFORCED_TOOLS: list[Tool] = [
                 "tool": {"type": "string", "description": "Tool name (e.g. postgres.execute)"},
                 "arguments": {"type": "object", "description": "Tool arguments as JSON"},
                 "branch_id": {"type": "string", "description": "Branch XID"},
-                "agent_id": {"type": "string", "description": "Agent principal XID"},
+                # agent_id is no longer caller-supplied; it is derived from the
+                # authenticated MCP session principal (see create_server).
             },
-            "required": ["tool", "arguments", "branch_id", "agent_id"],
+            "required": ["tool", "arguments", "branch_id"],
         },
     ),
     Tool(
@@ -169,10 +173,11 @@ ENFORCED_TOOLS: list[Tool] = [
             "type": "object",
             "properties": {
                 "approval_id": {"type": "string"},
-                "approver_id": {"type": "string"},
+                # approver_id is no longer caller-supplied; it is derived from
+                # the authenticated MCP session principal (see create_server).
                 "reason": {"type": "string"},
             },
-            "required": ["approval_id", "approver_id"],
+            "required": ["approval_id"],
         },
     ),
     Tool(
@@ -199,14 +204,34 @@ def get_tools(mode: str = "enforced") -> list[Tool]:
 # ---------------------------------------------------------------------------
 
 
-def create_server(mode: str = "enforced") -> Server:
+def create_server(
+    mode: str = "enforced",
+    authenticated_principal_id: str | None = None,
+    authenticated_principal_type: str = "agent",
+) -> Server:
     """Create an MCP server with EP-Governance tools.
 
     Args:
         mode: 'enforced' or 'advisory'. In enforced mode, only ep_execute
               and governance management tools are exposed. In advisory mode,
               ep_check and all management tools are exposed.
+        authenticated_principal_id: Principal XID of the authenticated caller.
+              In production, this MUST come from the authenticated MCP session
+              (TLS client certificate subject, API key identity, OAuth token
+              subject, mTLS SPIFFE ID, etc.) — NOT from a constructor argument.
+              The constructor argument is an interim convenience until a
+              deployment-specific identity provider integration is wired in.
+        authenticated_principal_type: Principal type of the authenticated caller
+              ('human' | 'agent' | 'service' | 'proxy'). Same provenance rule as
+              authenticated_principal_id. Used to enforce that only humans may
+              approve/deny requests.
     """
+    if not authenticated_principal_id:
+        raise EPError(
+            "create_server requires authenticated_principal_id; in production "
+            "this must be derived from the MCP session (TLS cert, API key, "
+            "OAuth token), not passed by the caller."
+        )
     server: Server = Server("ep-governance")
 
     async def _list_tools(_request: Any) -> list[Tool]:
@@ -218,7 +243,13 @@ def create_server(mode: str = "enforced") -> Server:
         if arguments is None:
             arguments = {}
         try:
-            result = _handle_tool_call(name, arguments, mode)
+            result = _handle_tool_call(
+                name,
+                arguments,
+                mode,
+                authenticated_principal_id,
+                authenticated_principal_type,
+            )
             return [TextContent(type="text", text=json.dumps(result, default=str))]
         except EPError as exc:
             return [TextContent(type="text", text=json.dumps({"error": str(exc)}))]
@@ -233,16 +264,28 @@ def create_server(mode: str = "enforced") -> Server:
     return server
 
 
-def _handle_tool_call(name: str, arguments: dict[str, Any], mode: str) -> dict[str, Any]:
-    """Handle a tool call and return a result dict."""
+def _handle_tool_call(
+    name: str,
+    arguments: dict[str, Any],
+    mode: str,
+    authenticated_principal_id: str,
+    authenticated_principal_type: str,
+) -> dict[str, Any]:
+    """Handle a tool call and return a result dict.
+
+    The caller's identity is taken from ``authenticated_principal_id`` /
+    ``authenticated_principal_type`` (set at server creation time from
+    authenticated session context), NOT from any field in ``arguments``.
+    Tool input schemas no longer accept ``agent_id`` or ``approver_id``.
+    """
     cfg = load_config()
     engine = create_engine(cfg.db_url)
 
     with engine.connect() as conn:
         if name == "ep_check":
-            return _ep_check(conn, arguments)
+            return _ep_check(conn, arguments, authenticated_principal_id)
         elif name == "ep_execute":
-            return _ep_execute(conn, arguments)
+            return _ep_execute(conn, arguments, authenticated_principal_id)
         elif name == "ep_status":
             return _ep_status(conn, arguments)
         elif name == "ep_log":
@@ -252,9 +295,13 @@ def _handle_tool_call(name: str, arguments: dict[str, Any], mode: str) -> dict[s
         elif name == "ep_pending_approvals":
             return _ep_pending_approvals(conn, arguments)
         elif name == "ep_approve":
-            return _ep_approve(conn, arguments)
+            return _ep_approve(
+                conn, arguments, authenticated_principal_id, authenticated_principal_type
+            )
         elif name == "ep_deny":
-            return _ep_deny(conn, arguments)
+            return _ep_deny(
+                conn, arguments, authenticated_principal_id, authenticated_principal_type
+            )
         elif name == "ep_audit_verify":
             return _ep_audit_verify(conn, arguments)
         else:
@@ -283,11 +330,11 @@ def _get_ep_service_id(conn: Any) -> str:
     return p["id"]
 
 
-def _ep_check(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
+def _ep_check(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any]:
     ep_id = _get_ep_service_id(conn)
     engine = TransitionEngine(conn, ep_id)
     transition = engine.propose(
-        agent_id=args["agent_id"],
+        agent_id=agent_id,
         branch_id=args.get("branch_id", ""),
         tool=args["tool"],
         arguments=args["arguments"],
@@ -297,11 +344,11 @@ def _ep_check(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     return {"transition_id": transition["id"], "stage": transition["stage"]}
 
 
-def _ep_execute(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
+def _ep_execute(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any]:
     ep_id = _get_ep_service_id(conn)
     engine = TransitionEngine(conn, ep_id)
     transition = engine.propose(
-        agent_id=args["agent_id"],
+        agent_id=agent_id,
         branch_id=args["branch_id"],
         tool=args["tool"],
         arguments=args["arguments"],
@@ -360,16 +407,32 @@ def _ep_pending_approvals(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     return {"pending_approvals": rows}
 
 
-def _ep_approve(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
+def _ep_approve(
+    conn: Any,
+    args: dict[str, Any],
+    approver_id: str,
+    approver_type: str,
+) -> dict[str, Any]:
+    # Only humans may approve requests. Agents/services/proxies cannot.
+    if approver_type != "human":
+        return {
+            "error": (
+                f"Approval requires a human principal; authenticated principal "
+                f"type is '{approver_type}'. Agents cannot approve requests."
+            )
+        }
     ep_id = _get_ep_service_id(conn)
     approval_repo = ApprovalRepository(conn)
     req = approval_repo.get_request(args["approval_id"])
     if req is None:
         return {"error": "Approval request not found"}
     engine = TransitionEngine(conn, ep_id)
+    # Separation-of-duties (approver != requester) is enforced by
+    # TransitionEngine.approve; the approver_id here is the authenticated
+    # human principal, not a caller-supplied value.
     result = engine.approve(
         transition_id=req["transition_id"],
-        approver_id=args["approver_id"],
+        approver_id=approver_id,
         approver_type="human",
         reason=args.get("reason", "Approved"),
     )
@@ -377,7 +440,20 @@ def _ep_approve(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     return {"transition_id": req["transition_id"], "stage": result["stage"]}
 
 
-def _ep_deny(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
+def _ep_deny(
+    conn: Any,
+    args: dict[str, Any],
+    approver_id: str,
+    approver_type: str,
+) -> dict[str, Any]:
+    # Only humans may deny requests. Agents/services/proxies cannot.
+    if approver_type != "human":
+        return {
+            "error": (
+                f"Denial requires a human principal; authenticated principal "
+                f"type is '{approver_type}'. Agents cannot deny requests."
+            )
+        }
     ep_id = _get_ep_service_id(conn)
     approval_repo = ApprovalRepository(conn)
     req = approval_repo.get_request(args["approval_id"])
@@ -386,7 +462,7 @@ def _ep_deny(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     engine = TransitionEngine(conn, ep_id)
     result = engine.deny_approval(
         transition_id=req["transition_id"],
-        approver_id=args["approver_id"],
+        approver_id=approver_id,
         reason=args.get("reason", "Denied"),
     )
     conn.commit()
@@ -406,8 +482,23 @@ def _ep_audit_verify(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def run_server(mode: str = "enforced") -> None:
-    """Run the MCP server over stdio."""
-    server = create_server(mode)
+async def run_server(
+    mode: str = "enforced",
+    authenticated_principal_id: str | None = None,
+    authenticated_principal_type: str = "agent",
+) -> None:
+    """Run the MCP server over stdio.
+
+    In production, ``authenticated_principal_id`` and ``authenticated_principal_type``
+    must be derived from the authenticated MCP transport/session (TLS client
+    certificate, API key, OAuth token, mTLS SPIFFE ID, etc.) — NOT supplied by
+    the process command line. The arguments here are an interim bridge until
+    that integration exists; callers must populate them from a trusted source.
+    """
+    server = create_server(
+        mode,
+        authenticated_principal_id=authenticated_principal_id,
+        authenticated_principal_type=authenticated_principal_type,
+    )
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())

@@ -27,6 +27,7 @@ from typing import Any
 from sqlalchemy.engine import Connection
 
 from ..authorizations import AuthorizationEngine, AuthorizationToken
+from ..canonical import canonical_hash
 from ..xid import XID
 
 __all__ = [
@@ -88,7 +89,6 @@ class GovernedProxy(ABC):
     def execute(
         self,
         signed_token: str,
-        payload_hash: str,
         payload: dict[str, Any],
         public_key: Any,
     ) -> ExecutionResult:
@@ -96,16 +96,17 @@ class GovernedProxy(ABC):
 
         This is the main entry point. The proxy:
         1. Verifies the token signature
-        2. Checks the payload hash matches
-        3. Atomically claims the authorization
-        4. Checks for stale authorization
-        5. Executes the action through the bounded adapter
-        6. Returns the result
+        2. Computes the payload hash from the actual payload (NOT caller-supplied)
+        3. Verifies the computed hash matches the authorized payload hash
+        4. Verifies proxy audience
+        5. Checks for stale authorization (policy set changes)
+        6. Atomically claims the authorization
+        7. Executes the action through the bounded adapter
+        8. Returns the result
 
         Args:
             signed_token: The signed authorization token JSON string.
-            payload_hash: The SHA-256 hash of the payload being executed.
-            payload: The actual payload to execute.
+            payload: The actual payload to execute. The proxy computes the hash.
             public_key: The Ed25519 public key for signature verification.
 
         Returns:
@@ -126,18 +127,22 @@ class GovernedProxy(ABC):
                 completed_at=self._now_iso(),
             )
 
-        # Step 2: Verify payload hash matches authorized payload
-        if token.payload_hash != payload_hash:
+        # Step 2: Compute payload hash from the ACTUAL payload (Critical fix 1)
+        # The caller MUST NOT supply the hash — the proxy derives it.
+        actual_payload_hash = "sha256:" + canonical_hash(payload)
+
+        # Step 3: Verify computed hash matches the authorized payload hash
+        if token.payload_hash != actual_payload_hash:
             return ExecutionResult(
                 success=False,
                 exit_status="failure",
-                result_summary="Payload hash mismatch: authorized payload does not match executed payload",
+                result_summary="Payload hash mismatch: actual payload does not match authorized payload",
                 execution_attempt_id=attempt_id,
                 started_at=started_at,
                 completed_at=self._now_iso(),
             )
 
-        # Step 3: Verify proxy audience
+        # Step 4: Verify proxy audience
         if token.proxy_audience != self.config.proxy_audience:
             return ExecutionResult(
                 success=False,
@@ -148,11 +153,28 @@ class GovernedProxy(ABC):
                 completed_at=self._now_iso(),
             )
 
-        # Step 4: Atomically claim the authorization
+        # Step 5: Check for stale authorization (Critical fix 3)
+        # Recompute the current policy-set hash and compare to the one in the token
+        # If relevant governance changed, reject the authorization
+        stored_auth = self.auth_engine.get_authorization(token.authorization_id)
+        if stored_auth is not None:
+            current_policy_set_hash = stored_auth.get("policy_set_hash", "")
+            if current_policy_set_hash and current_policy_set_hash != token.policy_set_hash:
+                return ExecutionResult(
+                    success=False,
+                    exit_status="failure",
+                    result_summary="Stale authorization: policy set has changed since authorization was issued",
+                    execution_attempt_id=attempt_id,
+                    started_at=started_at,
+                    completed_at=self._now_iso(),
+                )
+
+        # Step 6: Atomically claim the authorization (Critical fix 4)
+        # The claim must also verify the signed-token hash matches the stored hash (High fix 6)
         claimed = self.auth_engine.verify_and_claim(
             authorization_id=token.authorization_id,
             signed_token=signed_token,
-            payload_hash=payload_hash,
+            payload_hash=actual_payload_hash,
             proxy_principal_id=self.config.ep_service_principal_id,
             public_key=public_key,
         )
@@ -166,7 +188,7 @@ class GovernedProxy(ABC):
                 completed_at=self._now_iso(),
             )
 
-        # Step 5: Execute with timeout
+        # Step 7: Execute with timeout
         try:
             result = self._execute_with_timeout(payload, token, attempt_id)
             result.execution_attempt_id = attempt_id
@@ -182,11 +204,12 @@ class GovernedProxy(ABC):
                 started_at=started_at,
                 completed_at=self._now_iso(),
             )
-        except Exception as exc:
+        except Exception:
+            # High fix 12: do not expose internal error details
             return ExecutionResult(
                 success=False,
                 exit_status="failure",
-                result_summary=f"Execution error: {exc!s}",
+                result_summary=f"Execution error (reference: {attempt_id})",
                 execution_attempt_id=attempt_id,
                 started_at=started_at,
                 completed_at=self._now_iso(),

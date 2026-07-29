@@ -78,15 +78,19 @@ class AuditEvent:
     def to_envelope(self) -> dict[str, Any]:
         """Return the canonical envelope dict used for hash computation.
 
-        The envelope uses ``principal_id`` (not ``actor_principal_id``) per
-        v1.1.1 §4 and the contract test field set.
+        High fix 8: the envelope must include ALL immutable identity fields
+        to prevent tampering with lattice_id, authenticated_caller_id, or
+        event_writer_id without breaking the hash chain.
         """
         return {
             "sequence": self.sequence,
             "event_id": self.id,
+            "lattice_id": self.lattice_id,
             "event_type": self.event_type,
             "event_data": self.event_data,
-            "principal_id": self.actor_principal_id,
+            "actor_principal_id": self.actor_principal_id,
+            "authenticated_caller_id": self.authenticated_caller_id,
+            "event_writer_id": self.event_writer_id,
             "created_at": self.created_at,
             "previous_hash": self.previous_hash,
         }
@@ -185,12 +189,18 @@ class AuditWriter:
             created_at = _utc_now_iso()
 
             # 3. Build canonical envelope and compute hash
+            # High fix 8: hash must cover ALL immutable identity fields,
+            # not just sequence/event_id/event_type/data/principal/created_at/previous_hash.
+            # Include lattice_id, authenticated_caller_id, and event_writer_id.
             envelope: dict[str, Any] = {
                 "sequence": next_sequence,
                 "event_id": event_id,
+                "lattice_id": lattice_id,
                 "event_type": event_type,
                 "event_data": event_data,
-                "principal_id": actor_principal_id,
+                "actor_principal_id": actor_principal_id,
+                "authenticated_caller_id": authenticated_caller_id,
+                "event_writer_id": self.ep_service_principal_id,
                 "created_at": created_at,
                 "previous_hash": last_hash,
             }

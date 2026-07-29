@@ -203,7 +203,7 @@ class TestProxyTokenVerification:
         payload = {"sql": "SELECT 1", "host": "localhost", "database": "test"}
         payload_hash = "sha256:" + canonical_hash(payload)
 
-        result = proxy.execute(signed, payload_hash, payload, key_manager.public_key)
+        result = proxy.execute(signed, payload, key_manager.public_key)
         assert result.exit_status == "success"
         assert result.success is True
 
@@ -219,9 +219,9 @@ class TestProxyTokenVerification:
         signed = token.to_signed_token(key_manager)
         # Use a different payload than what was authorized
         altered_payload = {"sql": "DROP TABLE memory_items", "host": "localhost"}
-        altered_hash = "sha256:" + canonical_hash(altered_payload)
 
-        result = proxy.execute(signed, altered_hash, altered_payload, key_manager.public_key)
+        # The proxy now computes the hash internally — no caller-supplied hash
+        result = proxy.execute(signed, altered_payload, key_manager.public_key)
         assert result.success is False
         assert "mismatch" in result.result_summary.lower()
 
@@ -239,12 +239,12 @@ class TestProxyTokenVerification:
         payload_hash = "sha256:" + canonical_hash(payload)
 
         # First execution succeeds
-        result1 = proxy.execute(signed, payload_hash, payload, key_manager.public_key)
+        result1 = proxy.execute(signed, payload, key_manager.public_key)
         conn.commit()
         assert result1.success is True
 
         # Second execution with same token fails
-        result2 = proxy.execute(signed, payload_hash, payload, key_manager.public_key)
+        result2 = proxy.execute(signed, payload, key_manager.public_key)
         conn.commit()
         assert result2.success is False
         assert "already used" in result2.result_summary.lower() or "claim failed" in result2.result_summary.lower()
@@ -270,7 +270,7 @@ class TestProxyTokenVerification:
         payload = {"sql": "SELECT 1", "host": "localhost", "database": "test"}
         payload_hash = "sha256:" + canonical_hash(payload)
 
-        result = wrong_proxy.execute(signed, payload_hash, payload, key_manager.public_key)
+        result = wrong_proxy.execute(signed, payload, key_manager.public_key)
         assert result.success is False
         assert "audience" in result.result_summary.lower()
 
@@ -290,7 +290,7 @@ class TestProxySQLClassification:
         payload = {"sql": "SELECT 1 as result", "host": "localhost"}
         payload_hash = "sha256:" + canonical_hash(payload)
 
-        result = proxy.execute(signed, payload_hash, payload, key_manager.public_key)
+        result = proxy.execute(signed, payload, key_manager.public_key)
         assert result.success is True
         assert result.exit_status == "success"
 
@@ -308,7 +308,7 @@ class TestProxySQLClassification:
         payload = {"sql": "TRUNCATE TABLE ep_projects", "host": "localhost"}
         payload_hash = "sha256:" + canonical_hash(payload)
 
-        result = proxy.execute(signed, payload_hash, payload, key_manager.public_key)
+        result = proxy.execute(signed, payload, key_manager.public_key)
         assert result.success is False
         assert "forbidden" in result.result_summary.lower()
 
@@ -331,7 +331,7 @@ class TestProxySQLClassification:
         payload = {"host": "localhost"}
         payload_hash = "sha256:" + canonical_hash({"sql": "SELECT 1", "host": "localhost"})
 
-        result = proxy.execute(signed, payload_hash, payload, key_manager.public_key)
+        result = proxy.execute(signed, payload, key_manager.public_key)
         assert result.success is False
         assert "no sql" in result.result_summary.lower() or "mismatch" in result.result_summary.lower()
 
@@ -351,7 +351,7 @@ class TestProxyResultFlow:
         payload = {"sql": "SELECT 1 as val", "host": "localhost"}
         payload_hash = "sha256:" + canonical_hash(payload)
 
-        result = proxy.execute(signed, payload_hash, payload, key_manager.public_key)
+        result = proxy.execute(signed, payload, key_manager.public_key)
         conn.commit()
         assert result.success is True
         assert result.rows_affected >= 1
@@ -370,7 +370,7 @@ class TestProxyResultFlow:
         payload = {"sql": "SELECT 1", "host": "localhost"}
         payload_hash = "sha256:" + canonical_hash(payload)
 
-        result = proxy.execute(signed, payload_hash, payload, key_manager.public_key)
+        result = proxy.execute(signed, payload, key_manager.public_key)
         conn.commit()
 
         # Check the transition stage was advanced to executing by the claim

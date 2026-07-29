@@ -5,12 +5,16 @@
 
 -- ============================================================================
 -- ep_service role: full application access with audit-log protections
+-- Security note: roles are created WITHOUT LOGIN passwords.
+-- In production, credentials must be injected at deployment time via
+-- a secret manager, managed identity, or certificate authentication.
+-- A static migration MUST NOT install a working default password.
 -- ============================================================================
 
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ep_service') THEN
-        CREATE ROLE ep_service WITH LOGIN PASSWORD 'CHANGE_ME_IN_PRODUCTION';
+        CREATE ROLE ep_service NOLOGIN;
     END IF;
 END
 $$;
@@ -56,7 +60,7 @@ GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO ep_service;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'ep_agent') THEN
-        CREATE ROLE ep_agent WITH LOGIN PASSWORD 'CHANGE_ME_IN_PRODUCTION';
+        CREATE ROLE ep_agent NOLOGIN;
     END IF;
 END
 $$;

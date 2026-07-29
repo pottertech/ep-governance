@@ -71,56 +71,65 @@ class TestToolExposure:
 
 class TestServerCreation:
     def test_create_server_enforced(self):
-        server = create_server("enforced")
+        server = create_server("enforced", authenticated_principal_id="test-agent-1")
         assert server.name == "ep-governance"
 
     def test_create_server_advisory(self):
-        server = create_server("advisory")
+        server = create_server("advisory", authenticated_principal_id="test-agent-1")
         assert server.name == "ep-governance"
+
+    def test_create_server_requires_authenticated_principal(self):
+        """create_server must reject a missing authenticated_principal_id."""
+        with pytest.raises(Exception):
+            create_server("enforced")
 
 
 class TestToolCalls:
     def test_ep_status_without_branch(self, initialized_db, monkeypatch):
         """ep_status without branch_id returns a message."""
-        result = _handle_tool_call("ep_status", {}, "enforced")
+        result = _handle_tool_call("ep_status", {}, "enforced", "test-agent-1", "agent")
         assert "message" in result or "branch_id" in result
 
     def test_ep_list_policies_empty(self, initialized_db):
         """ep_list_policies returns empty list when no active policies."""
-        result = _handle_tool_call("ep_list_policies", {}, "enforced")
+        result = _handle_tool_call("ep_list_policies", {}, "enforced", "test-agent-1", "agent")
         assert "policies" in result
         assert result["policies"] == []
 
     def test_ep_pending_approvals_empty(self, initialized_db):
         """ep_pending_approvals returns empty list when no pending approvals."""
-        result = _handle_tool_call("ep_pending_approvals", {}, "enforced")
+        result = _handle_tool_call("ep_pending_approvals", {}, "enforced", "test-agent-1", "agent")
         assert "pending_approvals" in result
         assert result["pending_approvals"] == []
 
     def test_ep_audit_verify_empty_lattice(self, initialized_db):
         """ep_audit_verify returns valid=True for a lattice with no events."""
         result = _handle_tool_call(
-            "ep_audit_verify", {"lattice_id": "nonexistent"}, "enforced"
+            "ep_audit_verify",
+            {"lattice_id": "nonexistent"},
+            "enforced",
+            "test-agent-1",
+            "agent",
         )
         assert result["valid"] is True
 
     def test_unknown_tool_returns_error(self, initialized_db):
         """Calling an unknown tool returns an error."""
-        result = _handle_tool_call("unknown_tool", {}, "enforced")
+        result = _handle_tool_call("unknown_tool", {}, "enforced", "test-agent-1", "agent")
         assert "error" in result
 
 
 class TestNoSecretLeakage:
     def test_status_output_no_credentials(self, initialized_db):
         """MCP tool output must not contain database URLs or passwords."""
-        result = _handle_tool_call("ep_status", {}, "enforced")
+        result = _handle_tool_call("ep_status", {}, "enforced", "test-agent-1", "agent")
         output = json.dumps(result)
         assert "postgresql://" not in output
         assert "password" not in output.lower()
 
     def test_list_policies_no_credentials(self, initialized_db):
         """Policy listing must not contain secrets."""
-        result = _handle_tool_call("ep_list_policies", {}, "enforced")
+        result = _handle_tool_call("ep_list_policies", {}, "enforced", "test-agent-1", "agent")
         output = json.dumps(result)
         assert "password" not in output.lower()
         assert "secret" not in output.lower()
