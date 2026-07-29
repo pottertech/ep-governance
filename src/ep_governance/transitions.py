@@ -842,16 +842,19 @@ class TransitionEngine:
         After manual investigation, the operator determines the final
         outcome and records it.
 
-        When *final_status* is ``"succeeded"`` and a *branch_committer* is
-        provided, this method attempts branch commitment the same way the
-        proxy does — creating a graph node and advancing the branch head.
-        If branch commitment fails, the transition is reverted to
-        ``execution_uncertain`` with ``requires_manual_reconciliation=True``
-        so the operator can retry.
+        When *final_status* is ``"succeeded"``, a *branch_committer* MUST
+        be provided.  This method attempts branch commitment — creating a
+        graph node and advancing the branch head atomically.  If branch
+        commitment fails, the transition remains at ``execution_uncertain``
+        with ``requires_manual_reconciliation=True`` so the operator can
+        retry.
 
-        When *branch_committer* is ``None`` (not provided), the current
-        behaviour is preserved — the stage is advanced but no node is
-        created and a warning is logged to stderr.
+        When *final_status* is ``"succeeded"`` and *branch_committer* is
+        ``None``, this method raises ``IllegalTransitionError`` — successful
+        reconciliation always requires atomic graph commitment.
+
+        When *final_status* is ``"failed"``, the transition advances to
+        ``failed`` without creating a node (no graph state to realize).
 
         Args:
             transition_id:        XID of the transition.
@@ -943,26 +946,26 @@ class TransitionEngine:
                         lattice_id=commit_lattice_id,
                     )
                 except Exception as exc:
-                    # Branch commitment failed — revert to execution_uncertain
-                    # so the operator can retry.  The advance_stage call below
-                    # has NOT happened yet (we haven't advanced to succeeded),
-                    # so the transition is still in execution_uncertain.  We
-                    # only need to ensure requires_manual_reconciliation is
-                    # set and log the failure.
-                    self._set_requires_manual_reconciliation(transition_id, True)
-                    self._write_audit_event(
-                        transition_id=transition_id,
-                        branch_id=branch_id,
-                        event_type="transition.reconcile_commit_failed",
-                        actor_principal_id=agent_id,
-                        event_data={
-                            "transition_id": transition_id,
-                            "final_status": final_status,
-                            "result_summary": result_summary,
-                            "requires_manual_reconciliation": True,
-                            "error": str(exc),
-                        },
-                    )
+                    # Branch commitment failed — the transition is still at
+                    # 'execution_uncertain' (commit() rolls back on failure).
+                    # Record the failure atomically: set reconciliation flag
+                    # and write audit event in one transaction.
+                    if self.conn.in_transaction():
+                        self.conn.rollback()
+                    with transaction(self.conn):
+                        self._set_requires_manual_reconciliation(transition_id, True)
+                        self._write_audit_event(
+                            transition_id=transition_id,
+                            branch_id=branch_id,
+                            event_type="transition.reconcile_commit_failed",
+                            actor_principal_id=agent_id,
+                            event_data={
+                                "transition_id": transition_id,
+                                "final_status": final_status,
+                                "requires_manual_reconciliation": True,
+                            },
+                            in_transaction=True,
+                        )
                     # Re-read the (still execution_uncertain) transition
                     transition = self.transition_repo.get_transition(transition_id)
                     if transition is None:

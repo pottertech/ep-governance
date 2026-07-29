@@ -84,12 +84,14 @@ class BranchCommitter:
 
         Raises:
             IllegalTransitionError: If the transition is not in the
-                'executing' stage.  The stage advancement to 'succeeded'
-                happens atomically inside this transaction — if any later
-                step fails, the transaction rolls back and the transition
-                stays at 'executing'.  The 'succeeded' stage is no longer
-                accepted (Issue High 7 — prevents double-commit).
+                'executing' or 'execution_uncertain' stage.
             StaleHeadError: If the branch head has advanced since the proposal.
+
+        Note:
+            This method requires a clean database connection.  If the
+            connection has a pending autobegun transaction from prior reads,
+            it will be committed before the explicit transaction begins.
+            In production, prefer passing a dedicated fresh connection.
         """
         # All 9 steps run inside a single explicit transaction.  If any step
         # raises, the context manager rolls back and the transition stays at
