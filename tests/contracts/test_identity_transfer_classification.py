@@ -208,10 +208,10 @@ class TestClassificationContract:
 # ---------------------------------------------------------------------------
 
 CANONICAL_RESOURCE_EXAMPLES = {
-    "postgres": "postgres://cloudhub/gbrain_pilot/public/memory_items",
-    "host": "host://cloudhub.pottersquill.com",
-    "container": "container://cloudhub/open-webui",
-    "file": "file://cloudhub/etc/open-webui/config.yaml",
+    "postgres": "postgres://prod-server/production_db/public/memory_items",
+    "host": "host://example.internal",
+    "container": "container://prod-server/app-container",
+    "file": "file://prod-server/etc/app-container/config.yaml",
     "email": "email://recipient/example@example.com",
     "git": "git://github.com/pottertech/ep-governance/branch/main",
 }

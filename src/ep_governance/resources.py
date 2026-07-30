@@ -14,10 +14,10 @@ Canonical URI schemes:
 
 Examples::
 
-    postgres://cloudhub/gbrain_pilot/public/memory_items
-    host://cloudhub.pottersquill.com
-    container://cloudhub/open-webui
-    file://cloudhub/etc/open-webui/config.yaml
+    postgres://prod-server/production_db/public/memory_items
+    host://example.internal
+    container://prod-server/app-container
+    file://prod-server/etc/app-container/config.yaml
     email://recipient/example@example.com
     git://github.com/pottertech/ep-governance/branch/main
 """
@@ -55,8 +55,8 @@ _SUPPORTED_SCHEMES: frozenset[str] = frozenset(
 # Hostname aliases that we normalise to a single canonical hostname.
 _HOSTNAME_ALIASES: dict[str, str] = {
     # Add alias mappings here as needed, e.g.:
-    # "db": "cloudhub",
-    # "localhost": "cloudhub",
+    # "db": "prod-server",
+    # "localhost": "prod-server",
 }
 
 # Regex for a valid hostname label.
@@ -460,7 +460,7 @@ def match_glob(pattern: str, canonical: str) -> bool:
     are already lowercased where appropriate).
 
     Args:
-        pattern:  Glob pattern, e.g. ``postgres://cloudhub/*``.
+        pattern:  Glob pattern, e.g. ``postgres://prod-server/*``.
         canonical: Canonical resource URI string.
 
     Returns:

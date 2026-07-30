@@ -42,4 +42,7 @@ Thumbs.db
 
 # Database
 *.db
-*.sqlite3
+*.sqlite3__pycache__/
+*.pyc
+.pytest_cache/
+.hypothesis/

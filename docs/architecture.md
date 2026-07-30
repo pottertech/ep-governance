@@ -11,7 +11,7 @@
 ```
 ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
 │   Agent (Mary)   │     │  Agent (Brodie)  │     │  Agent (Arty)    │
-│   on Mac (local) │     │  on cloudhub     │     │  on Mac (local)  │
+│   on Mac (local) │     │  on prod-server     │     │  on Mac (local)  │
 └───┬──────────┬───┘     └───┬──────────┬───┘     └───┬──────────┬───┘
     │          │              │          │              │          │
     │ EP CLI   │ EP MCP       │ EP CLI   │ EP MCP       │ EP CLI   │ EP MCP

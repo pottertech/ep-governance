@@ -27,12 +27,12 @@ A policy is considered to **match** a proposed action when all of the following 
 ### 1.3 Canonical Resource Identity Matching
 
 - The classified target resource MUST match at least one entry in the policy's `resources` array.
-- Resource selectors use glob patterns: `env:production/**`, `host:cloudhub`, `db:gbrain_pilot`, `container:open-webui`.
+- Resource selectors use glob patterns: `env:production/**`, `host:prod-server`, `db:production_db`, `container:app-container`.
 - Matching is performed against the **canonical** resource identity, not raw agent-supplied strings.
 - Canonical resource formats are defined in `normative-spec.md` EP-RESOURCE-001 through EP-RESOURCE-006.
 - A resource selector matches if:
   - The selector exactly equals the canonical resource string, OR
-  - The selector is a prefix match with `/**` glob expansion (e.g., `db:gbrain_pilot/**` matches `db:gbrain_pilot/public/memory_items`).
+  - The selector is a prefix match with `/**` glob expansion (e.g., `db:production_db/**` matches `db:production_db/public/memory_items`).
 
 ### 1.4 Deterministic Condition Evaluation
 
