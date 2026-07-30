@@ -23,7 +23,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 import sqlalchemy as sa
-from sqlalchemy.engine import Connection
 
 from .audit import AuditWriter
 from .db.repositories import BranchRepository, NodeRepository, TransitionRepository
@@ -46,13 +45,9 @@ class BranchCommitter:
     If any step fails, the entire transaction rolls back.
     """
 
-    def __init__(self, conn: Connection, ep_service_principal_id: str) -> None:
-        self.conn = conn
+    def __init__(self, engine: sa.Engine, ep_service_principal_id: str) -> None:
+        self.engine = engine
         self.ep_service_principal_id = ep_service_principal_id
-        self.audit_writer = AuditWriter(conn, ep_service_principal_id)
-        self.branch_repo = BranchRepository(conn)
-        self.node_repo = NodeRepository(conn)
-        self.transition_repo = TransitionRepository(conn)
 
     def commit(
         self,
@@ -88,28 +83,26 @@ class BranchCommitter:
             StaleHeadError: If the branch head has advanced since the proposal.
 
         Note:
-            This method requires a clean database connection.  If the
-            connection has a pending autobegun transaction from prior reads,
-            it will be committed before the explicit transaction begins.
-            In production, prefer passing a dedicated fresh connection.
+            This method acquires a fresh connection from the engine and
+            runs all 9 steps inside a single transaction on that connection.
         """
-        # All 9 steps run inside a single explicit transaction.  If any step
-        # raises, the context manager rolls back and the transition stays at
-        # its original stage.  All reads (get_transition, get_head) are inside
-        # the transaction block — no pre-transaction reads that could
-        # autobegin a transaction.
-        #
-        # Requires a clean connection: if the caller has pending work on this
-        # connection, TransactionOwnershipError is raised.  Use a dedicated
-        # fresh connection per top-level operation.
-        with transaction(self.conn):
+        # All 9 steps run inside a single explicit transaction on a fresh
+        # connection.  If any step raises, the context manager rolls back
+        # and the transition stays at its original stage.
+        with self.engine.connect() as conn, transaction(conn):
+            # Create repositories and audit writer with the fresh connection.
+            transition_repo = TransitionRepository(conn)
+            branch_repo = BranchRepository(conn)
+            node_repo = NodeRepository(conn)
+            audit_writer = AuditWriter(self.engine, self.ep_service_principal_id)
+
             # Step 1: Verify transition stage is 'executing'.
             # The stage advancement to 'succeeded' happens atomically inside
             # this transaction — if any later step fails, the transaction
             # rolls back and the transition stays at its original stage.
             # Accept 'executing' (normal flow) and 'execution_uncertain'
             # (reconciliation flow). Do NOT accept 'succeeded' (double-commit).
-            transition = self.transition_repo.get_transition(transition_id)
+            transition = transition_repo.get_transition(transition_id)
             if transition is None:
                 raise IllegalTransitionError(f"Transition {transition_id} not found")
             stage = transition.get("stage", "")
@@ -120,7 +113,7 @@ class BranchCommitter:
                 )
 
             # Step 2: Verify branch head and version (optimistic concurrency)
-            head_node_id, current_version = self.branch_repo.get_head(branch_id)
+            head_node_id, current_version = branch_repo.get_head(branch_id)
             if expected_head_id is not None and head_node_id != expected_head_id:
                 raise StaleHeadError(
                     f"Branch head mismatch: expected {expected_head_id}, got {head_node_id}"
@@ -133,7 +126,7 @@ class BranchCommitter:
             # Step 3: Insert the realized node
             new_node_id = str(XID.new())
             now = _now_iso()
-            node = self.node_repo.insert_node(
+            node = node_repo.insert_node(
                 node_id=new_node_id,
                 branch_id=branch_id,
                 agent_id=agent_id,
@@ -145,7 +138,7 @@ class BranchCommitter:
 
             # Step 4: Insert dependency edge (from old head to new node)
             if head_node_id is not None:
-                self.conn.execute(
+                conn.execute(
                     sa.text(
                         "INSERT INTO ep_edges (id, upstream_node_id, downstream_node_id, "
                         "edge_type, weight, created_at) "
@@ -161,11 +154,11 @@ class BranchCommitter:
 
             # Step 5: Mark prior head superseded (if there was one)
             if head_node_id is not None:
-                self.node_repo.mark_superseded(head_node_id)
+                node_repo.mark_superseded(head_node_id)
 
             # Step 6: Update branch head
             new_version = expected_version + 1
-            updated = self.branch_repo.update_head(branch_id, new_node_id, expected_version)
+            updated = branch_repo.update_head(branch_id, new_node_id, expected_version)
             if not updated:
                 raise StaleHeadError(
                     f"Branch head update failed: another agent committed first "
@@ -180,13 +173,13 @@ class BranchCommitter:
             # The transition is in 'executing' (verified in Step 1), so we
             # advance it to 'succeeded' with an optimistic stage guard so that
             # a concurrent record_result(failure) cannot race with us.
-            self.transition_repo.update_result(
+            transition_repo.update_result(
                 transition_id,
                 exit_status="success",
                 result_summary=description,
                 to_node_id=new_node_id,
             )
-            updated_stage = self.transition_repo.update_stage(
+            updated_stage = transition_repo.update_stage(
                 transition_id,
                 "succeeded",
                 expected_current_stage=stage,
@@ -202,7 +195,8 @@ class BranchCommitter:
             # we are already inside the transaction opened above —
             # write_event() would start its own transaction and commit
             # prematurely, stealing ownership of this transaction.
-            self.audit_writer.write_event_in_transaction(
+            audit_writer.write_event_in_transaction(
+                conn,
                 lattice_id=lattice_id,
                 event_type="branch_committed",
                 event_data={
@@ -224,7 +218,7 @@ class BranchCommitter:
 
 
 def commit_branch_head(
-    conn: Connection,
+    engine: sa.Engine,
     ep_service_principal_id: str,
     transition_id: str,
     branch_id: str,
@@ -240,7 +234,7 @@ def commit_branch_head(
 
     Creates a BranchCommitter and calls commit() in a single call.
     """
-    committer = BranchCommitter(conn, ep_service_principal_id)
+    committer = BranchCommitter(engine, ep_service_principal_id)
     return committer.commit(
         transition_id=transition_id,
         branch_id=branch_id,

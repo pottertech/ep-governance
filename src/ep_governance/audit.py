@@ -28,7 +28,7 @@ from .errors import AuditWriteError
 from .xid import XID
 
 if TYPE_CHECKING:
-    from sqlalchemy.engine import Connection
+    from sqlalchemy.engine import Engine
 
 __all__ = [
     "GENESIS_HASH",
@@ -118,8 +118,8 @@ class AuditWriter:
     ``BEGIN IMMEDIATE`` on SQLite).
     """
 
-    def __init__(self, conn: Connection, ep_service_principal_id: str) -> None:
-        self.conn = conn
+    def __init__(self, engine: Engine, ep_service_principal_id: str) -> None:
+        self.engine = engine
         self.ep_service_principal_id = ep_service_principal_id
 
     def write_event(
@@ -132,21 +132,16 @@ class AuditWriter:
     ) -> AuditEvent:
         """Write a single audit event atomically (standalone).
 
-        This is a backward-compatible wrapper that owns its own transaction.
-        Callers that already hold a transaction (e.g. BranchCommitter.commit)
-        MUST call :meth:`write_event_in_transaction` instead to avoid
-        committing the outer transaction prematurely.
-
-        If SQLAlchemy has already autobegun a transaction (from prior reads
-        on this connection), it is committed first so that a clean explicit
-        transaction can be started.
+        This method acquires a fresh connection from the engine and runs
+        the write inside its own transaction.  Callers that already hold
+        a transaction MUST call :meth:`write_event_in_transaction` with
+        their connection instead.
 
         Returns the fully populated AuditEvent.
         """
-        # Requires a clean connection: TransactionOwnershipError is raised
-        # if the caller has pending work.  Use a dedicated fresh connection.
-        with transaction(self.conn):
+        with self.engine.connect() as conn, transaction(conn):
             return self.write_event_in_transaction(
+                conn,
                 lattice_id=lattice_id,
                 event_type=event_type,
                 event_data=event_data,
@@ -156,6 +151,7 @@ class AuditWriter:
 
     def write_event_in_transaction(
         self,
+        conn: Any,
         lattice_id: str,
         event_type: str,
         event_data: dict[str, Any],
@@ -186,7 +182,6 @@ class AuditWriter:
 
         Returns the fully populated AuditEvent.
         """
-        conn = self.conn
         dialect = conn.dialect.name
 
         # 1. Lock the audit head and read current state.
@@ -320,8 +315,8 @@ class AuditVerifier:
         (or GENESIS_HASH for the first event).
     """
 
-    def __init__(self, conn: Connection) -> None:
-        self.conn = conn
+    def __init__(self, engine: Engine) -> None:
+        self.engine = engine
 
     def verify(self, lattice_id: str) -> bool:
         """Verify the audit chain for a single lattice.
@@ -330,61 +325,63 @@ class AuditVerifier:
         event_hash and the previous_hash linkage is correct.
         Returns False on the first mismatch.
         """
-        conn = self.conn
-        result = conn.execute(
-            text(
-                "SELECT id, sequence, event_type, event_data, "
-                "       previous_hash, event_hash, actor_principal_id, "
-                "       authenticated_caller_id, event_writer_id, created_at "
-                "FROM ep_events "
-                "WHERE lattice_id = :lattice_id "
-                "ORDER BY sequence"
-            ),
-            {"lattice_id": lattice_id},
-        )
-        rows = result.fetchall()
-        if not rows:
-            # No events — nothing to verify.
-            return True
-
-        expected_previous_hash = GENESIS_HASH
-
-        for row in rows:
-            event = AuditEvent(
-                id=row[0],
-                lattice_id=lattice_id,
-                sequence=row[1],
-                event_type=row[2],
-                event_data=_load_json(row[3]),
-                previous_hash=row[4],
-                event_hash=row[5],
-                actor_principal_id=row[6],
-                authenticated_caller_id=row[7],
-                event_writer_id=row[8],
-                created_at=row[9],
+        with self.engine.connect() as conn:
+            result = conn.execute(
+                text(
+                    "SELECT id, sequence, event_type, event_data, "
+                    "       previous_hash, event_hash, actor_principal_id, "
+                    "       authenticated_caller_id, event_writer_id, created_at "
+                    "FROM ep_events "
+                    "WHERE lattice_id = :lattice_id "
+                    "ORDER BY sequence"
+                ),
+                {"lattice_id": lattice_id},
             )
+            rows = result.fetchall()
+            if not rows:
+                # No events — nothing to verify.
+                return True
 
-            # Recompute hash from the canonical envelope
-            recomputed = event.recompute_hash()
-            if recomputed != event.event_hash:
-                return False
+            expected_previous_hash = GENESIS_HASH
 
-            # Check previous_hash linkage
-            if event.previous_hash != expected_previous_hash:
-                return False
+            for row in rows:
+                event = AuditEvent(
+                    id=row[0],
+                    lattice_id=lattice_id,
+                    sequence=row[1],
+                    event_type=row[2],
+                    event_data=_load_json(row[3]),
+                    previous_hash=row[4],
+                    event_hash=row[5],
+                    actor_principal_id=row[6],
+                    authenticated_caller_id=row[7],
+                    event_writer_id=row[8],
+                    created_at=row[9],
+                )
 
-            expected_previous_hash = event.event_hash
+                # Recompute hash from the canonical envelope
+                recomputed = event.recompute_hash()
+                if recomputed != event.event_hash:
+                    return False
 
-        return True
+                # Check previous_hash linkage
+                if event.previous_hash != expected_previous_hash:
+                    return False
+
+                expected_previous_hash = event.event_hash
+
+            return True
 
     def verify_all(self) -> dict[str, bool]:
         """Verify the audit chains for all lattices.
 
         Returns a mapping of lattice_id -> bool (True = chain valid).
         """
-        conn = self.conn
-        result = conn.execute(text("SELECT DISTINCT lattice_id FROM ep_events ORDER BY lattice_id"))
-        lattice_ids = [row[0] for row in result.fetchall()]
+        with self.engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT DISTINCT lattice_id FROM ep_events ORDER BY lattice_id")
+            )
+            lattice_ids = [row[0] for row in result.fetchall()]
 
         return {lid: self.verify(lid) for lid in lattice_ids}
 

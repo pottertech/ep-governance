@@ -651,8 +651,8 @@ def _resolve_project_id(
 
 def _ep_check(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any]:
     ep_id = _get_ep_service_id(conn)
-    engine = TransitionEngine(conn, ep_id)
-    transition = engine.propose(
+    trans_engine = TransitionEngine(conn.engine, ep_id)
+    transition = trans_engine.propose(
         agent_id=agent_id,
         branch_id=args.get("branch_id", ""),
         tool=args["tool"],
@@ -665,8 +665,8 @@ def _ep_check(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any]:
 
 def _ep_execute(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any]:
     ep_id = _get_ep_service_id(conn)
-    engine = TransitionEngine(conn, ep_id)
-    transition = engine.propose(
+    trans_engine = TransitionEngine(conn.engine, ep_id)
+    transition = trans_engine.propose(
         agent_id=agent_id,
         branch_id=args["branch_id"],
         tool=args["tool"],
@@ -786,11 +786,11 @@ def _ep_approve(
     # Commit any pending reads so TransitionEngine.approve receives a clean
     # connection (it opens its own transaction — Issue Critical 2 / High 6).
     conn.commit()
-    engine = TransitionEngine(conn, ep_id)
+    trans_engine = TransitionEngine(conn.engine, ep_id)
     # Separation-of-duties (approver != requester) is enforced by
     # TransitionEngine.approve; the approver_id here is the authenticated
     # human principal, not a caller-supplied value.
-    result = engine.approve(
+    result = trans_engine.approve(
         transition_id=req["transition_id"],
         approver_id=approver_id,
         approver_type="human",
@@ -822,8 +822,8 @@ def _ep_deny(
     # Commit any pending reads so TransitionEngine.deny_approval receives a
     # clean connection (it opens its own transaction — Issue Critical 2 / High 6).
     conn.commit()
-    engine = TransitionEngine(conn, ep_id)
-    result = engine.deny_approval(
+    trans_engine = TransitionEngine(conn.engine, ep_id)
+    result = trans_engine.deny_approval(
         transition_id=req["transition_id"],
         approver_id=approver_id,
         reason=args.get("reason", "Denied"),
@@ -835,7 +835,7 @@ def _ep_deny(
 def _ep_audit_verify(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     from .audit import AuditVerifier
 
-    verifier = AuditVerifier(conn)
+    verifier = AuditVerifier(conn.engine)
     result = verifier.verify(args["lattice_id"])
     return {"lattice_id": args["lattice_id"], "valid": result}
 

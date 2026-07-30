@@ -170,24 +170,24 @@ def setup(conn, ep_service_id, agent_id):
 
 
 class TestStateMachine:
-    def test_legal_transitions_match_contract(self):
+    def test_legal_transitions_match_contract(self, engine):
         """The transitions module must match the Phase 1 contract."""
         from tests.contracts.test_transition_lifecycle import LEGAL_TRANSITIONS as CONTRACT
 
         assert LEGAL_TRANSITIONS == CONTRACT
 
-    def test_is_legal_transition_returns_true_for_legal(self):
+    def test_is_legal_transition_returns_true_for_legal(self, engine):
         assert is_legal_transition("proposed", "authorized") is True
         assert is_legal_transition("authorized", "executing") is True
         assert is_legal_transition("executing", "succeeded") is True
 
-    def test_is_legal_transition_returns_false_for_illegal(self):
+    def test_is_legal_transition_returns_false_for_illegal(self, engine):
         assert is_legal_transition("succeeded", "proposed") is False
         assert is_legal_transition("denied", "authorized") is False
         assert is_legal_transition("proposed", "succeeded") is False
 
-    def test_illegal_transition_raises(self, conn, ep_service_id, setup):
-        engine = TransitionEngine(conn, ep_service_id)
+    def test_illegal_transition_raises(self, conn, engine, ep_service_id, setup):
+        engine = TransitionEngine(engine, ep_service_id)
         # Try to advance a non-existent transition
         with pytest.raises(Exception):
             engine.advance_stage("nonexistent", "succeeded")
@@ -199,8 +199,8 @@ class TestStateMachine:
 
 
 class TestProposalLifecycle:
-    def test_propose_creates_transition(self, conn, ep_service_id, setup):
-        engine = TransitionEngine(conn, ep_service_id)
+    def test_propose_creates_transition(self, conn, engine, ep_service_id, setup):
+        engine = TransitionEngine(engine, ep_service_id)
         result = engine.propose(
             agent_id=setup["agent_id"],
             branch_id=setup["branch"]["id"],
@@ -212,8 +212,8 @@ class TestProposalLifecycle:
         assert result is not None
         assert result["stage"] in ("proposed", "authorized", "pending_approval", "denied")
 
-    def test_idempotency_returns_existing(self, conn, ep_service_id, setup):
-        engine = TransitionEngine(conn, ep_service_id)
+    def test_idempotency_returns_existing(self, conn, engine, ep_service_id, setup):
+        engine = TransitionEngine(engine, ep_service_id)
         key = str(XID.new())
         result1 = engine.propose(
             agent_id=setup["agent_id"],
@@ -240,9 +240,11 @@ class TestProposalLifecycle:
 
 
 class TestSelfApprovalRejection:
-    def test_agent_cannot_approve_own_action(self, conn, ep_service_id, agent_id, human_id, setup):
+    def test_agent_cannot_approve_own_action(
+        self, conn, engine, ep_service_id, agent_id, human_id, setup
+    ):
         """EP-POLICY-012: the requester must not approve their own action."""
-        engine = TransitionEngine(conn, ep_service_id)
+        engine = TransitionEngine(engine, ep_service_id)
 
         # Propose an action that goes to pending_approval
         transition = engine.propose(
@@ -270,9 +272,9 @@ class TestSelfApprovalRejection:
             pass
 
     def test_human_can_approve_other_agent_action(
-        self, conn, ep_service_id, agent_id, human_id, setup
+        self, conn, engine, ep_service_id, agent_id, human_id, setup
     ):
-        engine = TransitionEngine(conn, ep_service_id)
+        engine = TransitionEngine(engine, ep_service_id)
         transition = engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -296,18 +298,18 @@ class TestSelfApprovalRejection:
 
 
 class TestAuthorizationTokens:
-    def test_keymanager_generates_keypair(self):
+    def test_keymanager_generates_keypair(self, engine):
         km = KeyManager()
         assert km.private_key is not None
         assert km.public_key is not None
 
-    def test_issue_and_verify_token(self, conn, ep_service_id, agent_id, setup):
+    def test_issue_and_verify_token(self, conn, engine, ep_service_id, agent_id, setup):
         """Issue a token, verify it, and check it's valid."""
         km = KeyManager()
-        auth_engine = AuthorizationEngine(conn, km, ep_service_id)
+        auth_engine = AuthorizationEngine(engine, km, ep_service_id)
 
         # Create a transition first
-        trans_engine = TransitionEngine(conn, ep_service_id)
+        trans_engine = TransitionEngine(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -333,12 +335,12 @@ class TestAuthorizationTokens:
             assert token.signature != ""
             assert token.payload_hash == "sha256:" + "a" * 64
 
-    def test_token_replay_rejected(self, conn, ep_service_id, agent_id, setup):
+    def test_token_replay_rejected(self, conn, engine, ep_service_id, agent_id, setup):
         """Two attempts to claim one token — only one succeeds."""
         km = KeyManager()
-        auth_engine = AuthorizationEngine(conn, km, ep_service_id)
+        auth_engine = AuthorizationEngine(engine, km, ep_service_id)
 
-        trans_engine = TransitionEngine(conn, ep_service_id)
+        trans_engine = TransitionEngine(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -386,12 +388,12 @@ class TestAuthorizationTokens:
             conn.commit()
             assert result2 is None
 
-    def test_payload_alteration_rejected(self, conn, ep_service_id, agent_id, setup):
+    def test_payload_alteration_rejected(self, conn, engine, ep_service_id, agent_id, setup):
         """If payload hash is altered, execution is rejected."""
         km = KeyManager()
-        auth_engine = AuthorizationEngine(conn, km, ep_service_id)
+        auth_engine = AuthorizationEngine(engine, km, ep_service_id)
 
-        trans_engine = TransitionEngine(conn, ep_service_id)
+        trans_engine = TransitionEngine(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -438,7 +440,7 @@ class TestAuthorizationTokens:
 
 
 class TestBranchCommit:
-    def test_stale_head_detected(self, conn, ep_service_id, agent_id, setup):
+    def test_stale_head_detected(self, conn, engine, ep_service_id, agent_id, setup):
         """Two agents use the same branch head — one commits, other gets stale_head."""
         branch_id = setup["branch"]["id"]
         lattice_id = setup["lattice"]["id"]
@@ -477,7 +479,7 @@ class TestBranchCommit:
         conn.commit()
 
         # First commit succeeds
-        committer = BranchCommitter(conn, ep_service_id)
+        committer = BranchCommitter(engine, ep_service_id)
         result1 = committer.commit(
             transition_id=trans1["id"],
             branch_id=branch_id,
@@ -506,7 +508,7 @@ class TestBranchCommit:
         )
         conn.commit()
 
-        committer2 = BranchCommitter(conn, ep_service_id)
+        committer2 = BranchCommitter(engine, ep_service_id)
         with pytest.raises(StaleHeadError):
             committer2.commit(
                 transition_id=trans2["id"],
@@ -528,8 +530,10 @@ class TestBranchCommit:
 
 
 class TestExecutionResults:
-    def test_record_success_advances_to_succeeded(self, conn, ep_service_id, agent_id, setup):
-        engine = TransitionEngine(conn, ep_service_id)
+    def test_record_success_advances_to_succeeded(
+        self, conn, engine, ep_service_id, agent_id, setup
+    ):
+        engine = TransitionEngine(engine, ep_service_id)
         transition = engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -552,8 +556,8 @@ class TestExecutionResults:
             conn.commit()
             assert result["stage"] == "succeeded"
 
-    def test_record_failure_advances_to_failed(self, conn, ep_service_id, agent_id, setup):
-        engine = TransitionEngine(conn, ep_service_id)
+    def test_record_failure_advances_to_failed(self, conn, engine, ep_service_id, agent_id, setup):
+        engine = TransitionEngine(engine, ep_service_id)
         transition = engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -575,8 +579,10 @@ class TestExecutionResults:
             conn.commit()
             assert result["stage"] == "failed"
 
-    def test_timeout_becomes_execution_uncertain(self, conn, ep_service_id, agent_id, setup):
-        engine = TransitionEngine(conn, ep_service_id)
+    def test_timeout_becomes_execution_uncertain(
+        self, conn, engine, ep_service_id, agent_id, setup
+    ):
+        engine = TransitionEngine(engine, ep_service_id)
         transition = engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -598,12 +604,14 @@ class TestExecutionResults:
             conn.commit()
             assert result["stage"] == "execution_uncertain"
 
-    def test_reconcile_from_uncertain_to_succeeded(self, conn, ep_service_id, agent_id, setup):
+    def test_reconcile_from_uncertain_to_succeeded(
+        self, conn, engine, ep_service_id, agent_id, setup
+    ):
         from ep_governance.branches import BranchCommitter
 
-        engine = TransitionEngine(conn, ep_service_id)
-        committer = BranchCommitter(conn, ep_service_id)
-        transition = engine.propose(
+        trans_engine = TransitionEngine(engine, ep_service_id)
+        committer = BranchCommitter(engine, ep_service_id)
+        transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
             tool="postgres.execute",
@@ -613,14 +621,13 @@ class TestExecutionResults:
         conn.commit()
 
         if transition["stage"] == "authorized":
-            engine.advance_stage(transition["id"], "executing")
-            conn.commit()
-            engine.record_result(transition["id"], "timeout", "timed out")
-            conn.commit()
+            trans_engine.advance_stage(transition["id"], "executing")
+            trans_engine.record_result(transition["id"], "timeout", "timed out")
 
-            head_id, version = BranchRepository(conn).get_head(setup["branch"]["id"])
-            conn.commit()
-            result = engine.reconcile(
+            # Use a fresh read connection to get the latest head/version
+            with engine.connect() as read_conn:
+                head_id, version = BranchRepository(read_conn).get_head(setup["branch"]["id"])
+            result = trans_engine.reconcile(
                 transition_id=transition["id"],
                 final_status="succeeded",
                 result_summary="Actually completed",

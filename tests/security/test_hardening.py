@@ -171,7 +171,7 @@ def setup(conn, ep_service_id, agent_id):
 
 
 class TestConcurrencyStress:
-    def test_two_agents_same_branch_head_one_wins(self, conn, setup):
+    def test_two_agents_same_branch_head_one_wins(self, conn, engine, setup):
         """Two agents commit from same head — one succeeds, other gets stale_head."""
         branch_id = setup["branch"]["id"]
         lattice_id = setup["lattice"]["id"]
@@ -203,7 +203,7 @@ class TestConcurrencyStress:
         )
         conn.commit()
 
-        committer = BranchCommitter(conn, setup["ep_service_id"])
+        committer = BranchCommitter(engine, setup["ep_service_id"])
 
         # First commit succeeds
         result1 = committer.commit(
@@ -235,7 +235,7 @@ class TestConcurrencyStress:
             )
         conn.rollback()
 
-    def test_concurrent_audit_insertion_sequences_unique(self, conn, setup, ep_service_id):
+    def test_concurrent_audit_insertion_sequences_unique(self, conn, engine, setup, ep_service_id):
         """Sequential audit insertions must produce unique sequences and valid chain.
 
         Note: SQLite does not support concurrent writes on the same connection.
@@ -243,7 +243,7 @@ class TestConcurrencyStress:
         writes. True concurrency tests require PostgreSQL with FOR UPDATE locking.
         """
         lattice_id = setup["lattice"]["id"]
-        writer = AuditWriter(conn, ep_service_id)
+        writer = AuditWriter(engine, ep_service_id)
 
         results: list[int] = []
         for i in range(50):
@@ -261,7 +261,7 @@ class TestConcurrencyStress:
         assert len(results) == len(set(results))
         assert len(results) == 50
         # Chain must be valid
-        verifier = AuditVerifier(conn)
+        verifier = AuditVerifier(engine)
         assert verifier.verify(lattice_id) is True
 
 
@@ -271,13 +271,13 @@ class TestConcurrencyStress:
 
 
 class TestTokenReplay:
-    def test_two_claims_one_token(self, conn, setup, ep_service_id, agent_id):
+    def test_two_claims_one_token(self, conn, engine, setup, ep_service_id, agent_id):
         """Two proxies attempt to claim one token — exactly one succeeds."""
         km = KeyManager()
-        auth_engine = AuthorizationEngine(conn, km, ep_service_id)
+        auth_engine = AuthorizationEngine(engine, km, ep_service_id)
 
         # Create a transition and authorize
-        trans_engine = TransitionEngine(conn, ep_service_id)
+        trans_engine = TransitionEngine(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -351,7 +351,7 @@ class TestKeyRotation:
 
 
 class TestDeniedCreatesNoNode:
-    def test_denied_transition_no_node(self, conn, setup, ep_service_id, agent_id):
+    def test_denied_transition_no_node(self, conn, engine, setup, ep_service_id, agent_id):
         """A denied transition must not create a graph node."""
         # Create a deny policy
         policy_repo = PolicyRepository(conn)
@@ -379,7 +379,7 @@ class TestDeniedCreatesNoNode:
         )
         conn.commit()
 
-        trans_engine = TransitionEngine(conn, ep_service_id)
+        trans_engine = TransitionEngine(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -408,9 +408,11 @@ class TestDeniedCreatesNoNode:
 
 
 class TestExecutionUncertain:
-    def test_timeout_becomes_uncertain_not_failed(self, conn, setup, ep_service_id, agent_id):
+    def test_timeout_becomes_uncertain_not_failed(
+        self, conn, engine, setup, ep_service_id, agent_id
+    ):
         """Timeout must produce execution_uncertain, not failed."""
-        trans_engine = TransitionEngine(conn, ep_service_id)
+        trans_engine = TransitionEngine(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -428,13 +430,15 @@ class TestExecutionUncertain:
             assert result["stage"] == "execution_uncertain"
             assert result["stage"] != "failed"
 
-    def test_uncertain_can_be_reconciled_to_succeeded(self, conn, setup, ep_service_id, agent_id):
+    def test_uncertain_can_be_reconciled_to_succeeded(
+        self, conn, engine, setup, ep_service_id, agent_id
+    ):
         """execution_uncertain can be reconciled to succeeded later."""
         from ep_governance.branches import BranchCommitter
         from ep_governance.db.repositories import BranchRepository
 
-        trans_engine = TransitionEngine(conn, ep_service_id)
-        committer = BranchCommitter(conn, ep_service_id)
+        trans_engine = TransitionEngine(engine, ep_service_id)
+        committer = BranchCommitter(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -452,7 +456,9 @@ class TestExecutionUncertain:
             head_id, version = BranchRepository(conn).get_head(setup["branch"]["id"])
             conn.commit()
             result = trans_engine.reconcile(
-                transition["id"], "succeeded", "Actually completed",
+                transition["id"],
+                "succeeded",
+                "Actually completed",
                 branch_committer=committer,
                 expected_head_id=head_id,
                 expected_version=version,
@@ -490,7 +496,7 @@ class TestDeploymentIsolation:
         assert "postgres.execute" not in names
         assert "docker.stop" not in names
 
-    def test_advisory_mode_documented_limitations(self):
+    def test_advisory_mode_documented_limitations(self, engine):
         """Advisory mode tools must include ep_check (non-binding)."""
         from ep_governance.mcp_server import get_tools
 
@@ -507,10 +513,10 @@ class TestDeploymentIsolation:
 
 
 class TestAuditTamperDetection:
-    def test_tamper_detected_by_verifier(self, conn, setup, ep_service_id):
+    def test_tamper_detected_by_verifier(self, conn, engine, setup, ep_service_id):
         """Tampering with an audit event must be detected by the verifier."""
         lattice_id = setup["lattice"]["id"]
-        writer = AuditWriter(conn, ep_service_id)
+        writer = AuditWriter(engine, ep_service_id)
 
         # Write 3 events
         for i in range(3):
@@ -524,7 +530,7 @@ class TestAuditTamperDetection:
         conn.commit()
 
         # Verify chain is valid
-        verifier = AuditVerifier(conn)
+        verifier = AuditVerifier(engine)
         assert verifier.verify(lattice_id) is True
 
         # Tamper: modify an event's data
@@ -547,9 +553,11 @@ class TestAuditTamperDetection:
 
 
 class TestSelfApprovalAdversarial:
-    def test_agent_cannot_approve_own_action(self, conn, setup, ep_service_id, agent_id, human_id):
+    def test_agent_cannot_approve_own_action(
+        self, conn, engine, setup, ep_service_id, agent_id, human_id
+    ):
         """An agent must not approve its own action."""
-        trans_engine = TransitionEngine(conn, ep_service_id)
+        trans_engine = TransitionEngine(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -570,10 +578,10 @@ class TestSelfApprovalAdversarial:
             conn.rollback()
 
     def test_human_can_approve_other_agent_action(
-        self, conn, setup, ep_service_id, agent_id, human_id
+        self, conn, engine, setup, ep_service_id, agent_id, human_id
     ):
         """A human can approve another agent's action."""
-        trans_engine = TransitionEngine(conn, ep_service_id)
+        trans_engine = TransitionEngine(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],

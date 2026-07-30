@@ -357,7 +357,7 @@ class TestPolicyRepository:
 
 
 class TestAuditWriter:
-    def test_write_single_event(self, conn, ep_service_principal_id):
+    def test_write_single_event(self, conn, engine, ep_service_principal_id):
         """Writing a single audit event should create the event and update the head."""
         # Create a lattice first
         proj_repo = ProjectRepository(conn)
@@ -375,7 +375,7 @@ class TestAuditWriter:
         )
         conn.commit()
 
-        writer = AuditWriter(conn, ep_service_principal_id)
+        writer = AuditWriter(engine, ep_service_principal_id)
         event = writer.write_event(
             lattice_id=lattice["id"],
             event_type="transition_proposed",
@@ -390,7 +390,7 @@ class TestAuditWriter:
         assert len(event.event_hash) == 64
         assert event.event_hash != "0" * 64
 
-    def test_write_multiple_events_chain(self, conn, ep_service_principal_id):
+    def test_write_multiple_events_chain(self, conn, engine, ep_service_principal_id):
         """Multiple events should form a hash chain."""
         proj_repo = ProjectRepository(conn)
         project = proj_repo.create_project("Test", "")
@@ -407,7 +407,7 @@ class TestAuditWriter:
         )
         conn.commit()
 
-        writer = AuditWriter(conn, ep_service_principal_id)
+        writer = AuditWriter(engine, ep_service_principal_id)
         events = []
         for i in range(5):
             event = writer.write_event(
@@ -428,7 +428,7 @@ class TestAuditWriter:
 
 
 class TestAuditVerifier:
-    def test_verify_valid_chain(self, conn, ep_service_principal_id):
+    def test_verify_valid_chain(self, conn, engine, ep_service_principal_id):
         """A valid chain should verify as True."""
         proj_repo = ProjectRepository(conn)
         project = proj_repo.create_project("Test", "")
@@ -445,7 +445,7 @@ class TestAuditVerifier:
         )
         conn.commit()
 
-        writer = AuditWriter(conn, ep_service_principal_id)
+        writer = AuditWriter(engine, ep_service_principal_id)
         for i in range(5):
             writer.write_event(
                 lattice_id=lattice["id"],
@@ -456,12 +456,12 @@ class TestAuditVerifier:
             )
         conn.commit()
 
-        verifier = AuditVerifier(conn)
+        verifier = AuditVerifier(engine)
         assert verifier.verify(lattice["id"]) is True
 
-    def test_verify_empty_lattice(self, conn):
+    def test_verify_empty_lattice(self, conn, engine):
         """An empty lattice (no events) should verify as True."""
-        verifier = AuditVerifier(conn)
+        verifier = AuditVerifier(engine)
         assert verifier.verify("nonexistent") is True  # no events = valid
 
 

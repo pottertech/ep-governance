@@ -63,6 +63,12 @@ def _get_conn() -> Connection:
     return engine.connect()
 
 
+def _get_engine():
+    """Load config and return a SQLAlchemy Engine."""
+    cfg = load_config()
+    return create_engine(cfg.db_url)
+
+
 def _get_conn_with_migrations() -> Connection:
     """Load config, run migrations, return connection."""
     cfg = load_config()
@@ -407,7 +413,7 @@ def check(
         import json as json_mod
 
         args = json_mod.loads(arguments)
-        trans_engine = TransitionEngine(conn, ep_id)
+        trans_engine = TransitionEngine(conn.engine, ep_id)
         transition = trans_engine.propose(
             agent_id=agent,
             branch_id=branch or "",
@@ -438,7 +444,7 @@ def execute(
         import json as json_mod
 
         args = json_mod.loads(arguments)
-        trans_engine = TransitionEngine(conn, ep_id)
+        trans_engine = TransitionEngine(conn.engine, ep_id)
         transition = trans_engine.propose(
             agent_id=agent,
             branch_id=branch,
@@ -527,7 +533,7 @@ def audit_verify(
     """Verify the audit chain for a lattice."""
     try:
         conn = _get_conn()
-        verifier = AuditVerifier(conn)
+        verifier = AuditVerifier(conn.engine)
         result = verifier.verify(lattice)
         conn.close()
         _output({"lattice_id": lattice, "valid": result}, json)
@@ -604,7 +610,7 @@ def approve(
         # Commit any pending reads so TransitionEngine.approve receives a clean
         # connection (it opens its own transaction — Issue Critical 2 / High 6).
         conn.commit()
-        trans_engine = TransitionEngine(conn, ep_id)
+        trans_engine = TransitionEngine(conn.engine, ep_id)
         result = trans_engine.approve(
             transition_id=req["transition_id"],
             approver_id=approver,
@@ -645,7 +651,7 @@ def deny(
         # Commit any pending reads so TransitionEngine.deny_approval receives a
         # clean connection (it opens its own transaction — Issue Critical 2 / High 6).
         conn.commit()
-        trans_engine = TransitionEngine(conn, ep_id)
+        trans_engine = TransitionEngine(conn.engine, ep_id)
         result = trans_engine.deny_approval(
             transition_id=req["transition_id"],
             approver_id=approver,

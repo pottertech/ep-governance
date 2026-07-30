@@ -49,7 +49,7 @@ class PostgresProxy(GovernedProxy):
 
     def __init__(
         self,
-        conn: Any,
+        engine: sa.Engine,
         auth_engine: Any,
         config: ProxyConfig,
         transition_engine: Any | None = None,
@@ -57,7 +57,7 @@ class PostgresProxy(GovernedProxy):
         policy_engine: Any | None = None,
     ) -> None:
         super().__init__(
-            conn, auth_engine, config, transition_engine, branch_committer, policy_engine
+            engine, auth_engine, config, transition_engine, branch_committer, policy_engine
         )
         self._target_engine: sa.Engine | None = None
 

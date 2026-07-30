@@ -29,11 +29,13 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import sqlalchemy as sa
 from nacl.encoding import RawEncoder
 from nacl.signing import SigningKey, VerifyKey
 
 from .canonical import canonical_hash, canonical_json, canonical_json_bytes
 from .db.repositories import AuthorizationRepository, TransitionRepository
+from .db.transactions import transaction
 from .errors import (
     TokenInvalidError,
 )
@@ -268,7 +270,7 @@ class AuthorizationEngine:
 
     def __init__(
         self,
-        conn: Any,
+        engine: sa.Engine,
         key_manager: KeyManager,
         ep_service_principal_id: str,
         token_ttl_seconds: int = DEFAULT_TOKEN_TTL_SECONDS,
@@ -276,12 +278,12 @@ class AuthorizationEngine:
         """Initialize the engine.
 
         Args:
-            conn:                  A SQLAlchemy ``Connection``.
+            engine:                  A SQLAlchemy ``Engine``.
             key_manager:           The EP's :class:`KeyManager`.
             ep_service_principal_id: XID of the EP service principal.
             token_ttl_seconds:     Token lifetime (default 300 = 5 min).
         """
-        self.conn = conn
+        self.engine = engine
         self.key_manager = key_manager
         self.ep_service_principal_id = ep_service_principal_id
         self.token_ttl_seconds = token_ttl_seconds
@@ -367,25 +369,26 @@ class AuthorizationEngine:
         token_hash = hashlib.sha256(signed_token_json.encode("utf-8")).hexdigest()
 
         # 7. Persist to ep_authorizations via the repository.
-        auth_repo = AuthorizationRepository(self.conn)
-        auth_repo.insert_authorization(
-            {
-                "id": authorization_id,
-                "transition_id": transition_id,
-                "agent_id": agent_id,
-                "project_id": project_id,
-                "branch_id": branch_id,
-                "proxy_audience": proxy_audience,
-                "tool": tool,
-                "payload_hash": payload_hash,
-                "policy_set_hash": policy_set_hash,
-                "token_hash": token_hash,
-                "matched_policy_versions": matched_policy_versions,
-                "issued_at": issued_at,
-                "expires_at": expires_at,
-                "nonce": nonce,
-            }
-        )
+        with self.engine.connect() as conn, transaction(conn):
+            auth_repo = AuthorizationRepository(conn)
+            auth_repo.insert_authorization(
+                {
+                    "id": authorization_id,
+                    "transition_id": transition_id,
+                    "agent_id": agent_id,
+                    "project_id": project_id,
+                    "branch_id": branch_id,
+                    "proxy_audience": proxy_audience,
+                    "tool": tool,
+                    "payload_hash": payload_hash,
+                    "policy_set_hash": policy_set_hash,
+                    "token_hash": token_hash,
+                    "matched_policy_versions": matched_policy_versions,
+                    "issued_at": issued_at,
+                    "expires_at": expires_at,
+                    "nonce": nonce,
+                }
+            )
 
         # 8. Return the signed token for the agent → proxy handoff.
         return token
@@ -399,8 +402,9 @@ class AuthorizationEngine:
 
         Delegates to :meth:`AuthorizationRepository.get_authorization`.
         """
-        auth_repo = AuthorizationRepository(self.conn)
-        return auth_repo.get_authorization(authorization_id)
+        with self.engine.connect() as conn:
+            auth_repo = AuthorizationRepository(conn)
+            return auth_repo.get_authorization(authorization_id)
 
     # ------------------------------------------------------------------ #
     # Verification + atomic claim
@@ -483,70 +487,72 @@ class AuthorizationEngine:
         #    used if the record has a different token_hash.
         presented_token_hash = hashlib.sha256(signed_token.encode("utf-8")).hexdigest()
 
-        auth_repo = AuthorizationRepository(self.conn)
-        stored_auth = auth_repo.get_authorization(authorization_id)
-        if stored_auth is None:
-            return None
-        stored_token_hash = stored_auth.get("token_hash", "")
-        if not stored_token_hash or presented_token_hash != stored_token_hash:
-            return None
-
         # 6. Generate the execution_attempt_id up front so it can be stored on
         #    the authorization record within the same transaction as the claim.
         execution_attempt_id = str(XID.new())
 
-        # 7. Atomically claim the authorization and advance the transition in a
-        #    single transaction (SAVEPOINT).  If the transition advancement
-        #    fails, the claim is rolled back so the authorization is not left
-        #    marked as used.
-        transition_repo = TransitionRepository(self.conn)
-        savepoint = self.conn.begin_nested()
-        try:
-            claimed = auth_repo.claim_authorization(
-                authorization_id,
-                proxy_principal_id,
-                token_hash=presented_token_hash,
-            )
-            if claimed is None:
-                savepoint.rollback()
+        # 7. Acquire a fresh connection and atomically claim the authorization
+        #    and advance the transition in a single transaction.  If the
+        #    transition advancement fails, the claim is rolled back so the
+        #    authorization is not left marked as used.
+        with self.engine.connect() as conn, transaction(conn):
+            auth_repo = AuthorizationRepository(conn)
+            transition_repo = TransitionRepository(conn)
+
+            stored_auth = auth_repo.get_authorization(authorization_id)
+            if stored_auth is None:
+                return None
+            stored_token_hash = stored_auth.get("token_hash", "")
+            if not stored_token_hash or presented_token_hash != stored_token_hash:
                 return None
 
-            # Persist the execution_attempt_id on the authorization record.
-            auth_repo.update_execution_attempt_id(authorization_id, execution_attempt_id)
-
-            # Advance the transition to 'executing', guarding that the current
-            #    stage is 'authorized'.  If this fails, roll back the claim.
-            transition_id = claimed.get("transition_id", "")
-            if transition_id:
-                ok = transition_repo.update_stage(
-                    transition_id,
-                    "executing",
-                    expected_current_stage="authorized",
+            savepoint = conn.begin_nested()
+            try:
+                claimed = auth_repo.claim_authorization(
+                    authorization_id,
+                    proxy_principal_id,
+                    token_hash=presented_token_hash,
                 )
-                if not ok:
+                if claimed is None:
                     savepoint.rollback()
                     return None
-            else:
-                # No transition to advance — cannot safely proceed.
+
+                # Persist the execution_attempt_id on the authorization record.
+                auth_repo.update_execution_attempt_id(authorization_id, execution_attempt_id)
+
+                # Advance the transition to 'executing', guarding that the current
+                #    stage is 'authorized'.  If this fails, roll back the claim.
+                transition_id = claimed.get("transition_id", "")
+                if transition_id:
+                    ok = transition_repo.update_stage(
+                        transition_id,
+                        "executing",
+                        expected_current_stage="authorized",
+                    )
+                    if not ok:
+                        savepoint.rollback()
+                        return None
+                else:
+                    # No transition to advance — cannot safely proceed.
+                    savepoint.rollback()
+                    return None
+
+                savepoint.commit()
+            except Exception:
                 savepoint.rollback()
-                return None
+                raise
 
-            savepoint.commit()
-        except Exception:
-            savepoint.rollback()
-            raise
-
-        # 8. Build and return the result dict.
-        result: dict[str, Any] = {
-            "authorization_id": authorization_id,
-            "transition_id": claimed.get("transition_id", ""),
-            "execution_attempt_id": execution_attempt_id,
-            "payload_hash": claimed.get("payload_hash", payload_hash),
-            "policy_set_hash": claimed.get("policy_set_hash", ""),
-            "proxy_principal_id": proxy_principal_id,
-            "claimed": True,
-        }
-        return result
+            # 8. Build and return the result dict.
+            result: dict[str, Any] = {
+                "authorization_id": authorization_id,
+                "transition_id": claimed.get("transition_id", ""),
+                "execution_attempt_id": execution_attempt_id,
+                "payload_hash": claimed.get("payload_hash", payload_hash),
+                "policy_set_hash": claimed.get("policy_set_hash", ""),
+                "proxy_principal_id": proxy_principal_id,
+                "claimed": True,
+            }
+            return result
 
     # ------------------------------------------------------------------ #
     # Staleness detection
@@ -571,16 +577,17 @@ class AuthorizationEngine:
         Returns:
             ``True`` if stale, ``False`` if still valid.
         """
-        auth_repo = AuthorizationRepository(self.conn)
-        auth = auth_repo.get_authorization(authorization_id)
-        if auth is None:
-            return True  # not found → treat as stale / invalid
+        with self.engine.connect() as conn:
+            auth_repo = AuthorizationRepository(conn)
+            auth = auth_repo.get_authorization(authorization_id)
+            if auth is None:
+                return True  # not found → treat as stale / invalid
 
-        stored_hash = auth.get("policy_set_hash")
-        if stored_hash is None or stored_hash == "":
-            return current_policy_set_hash != ""
+            stored_hash = auth.get("policy_set_hash")
+            if stored_hash is None or stored_hash == "":
+                return current_policy_set_hash != ""
 
-        return stored_hash != current_policy_set_hash
+            return stored_hash != current_policy_set_hash
 
     # ------------------------------------------------------------------ #
     # Standalone token verification

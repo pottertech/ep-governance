@@ -151,24 +151,24 @@ def key_manager():
 
 
 @pytest.fixture
-def auth_engine(conn, key_manager, ep_service_id):
-    return AuthorizationEngine(conn, key_manager, ep_service_id)
+def auth_engine(engine, key_manager, ep_service_id):
+    return AuthorizationEngine(engine, key_manager, ep_service_id)
 
 
 @pytest.fixture
-def proxy(conn, auth_engine, ep_service_id, setup):
+def proxy(engine, auth_engine, ep_service_id, setup):
     """Create a PostgresProxy pointed at the EP governance DB itself for testing."""
     from ep_governance.transitions import TransitionEngine
     from ep_governance.branches import BranchCommitter
 
-    trans_engine = TransitionEngine(conn, ep_service_id)
-    committer = BranchCommitter(conn, ep_service_id)
+    trans_engine = TransitionEngine(engine, ep_service_id)
+    committer = BranchCommitter(engine, ep_service_id)
     config = ProxyConfig(
         target_connection_string=_get_db_url(),
         proxy_audience="postgres-proxy",
         ep_service_principal_id=ep_service_id,
     )
-    return PostgresProxy(conn, auth_engine, config, trans_engine, committer, None)
+    return PostgresProxy(engine, auth_engine, config, trans_engine, committer, None)
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +178,7 @@ def proxy(conn, auth_engine, ep_service_id, setup):
 
 def _propose_and_authorize(
     conn,
+    engine,
     ep_service_id,
     agent_id,
     setup,
@@ -190,7 +191,7 @@ def _propose_and_authorize(
     if arguments is None:
         arguments = {"sql": "SELECT 1", "host": "localhost", "database": "test"}
 
-    trans_engine = TransitionEngine(conn, ep_service_id)
+    trans_engine = TransitionEngine(engine, ep_service_id)
     transition = trans_engine.propose(
         agent_id=agent_id,
         branch_id=setup["branch"]["id"],
@@ -225,10 +226,11 @@ def _propose_and_authorize(
 
 
 class TestProxyTokenVerification:
-    def test_valid_token_accepted(self, conn, setup, key_manager, auth_engine, proxy):
+    def test_valid_token_accepted(self, conn, engine, setup, key_manager, auth_engine, proxy):
         """A valid signed token should be accepted by the proxy."""
         transition, token = _propose_and_authorize(
             conn,
+            engine,
             setup["ep_service_id"],
             setup["agent_id"],
             setup,
@@ -246,10 +248,11 @@ class TestProxyTokenVerification:
         assert result.exit_status == "success"
         assert result.success is True
 
-    def test_altered_payload_rejected(self, conn, setup, key_manager, auth_engine, proxy):
+    def test_altered_payload_rejected(self, conn, engine, setup, key_manager, auth_engine, proxy):
         """If the payload hash is altered, execution must be rejected."""
         transition, token = _propose_and_authorize(
             conn,
+            engine,
             setup["ep_service_id"],
             setup["agent_id"],
             setup,
@@ -268,10 +271,11 @@ class TestProxyTokenVerification:
         assert result.success is False
         assert "mismatch" in result.result_summary.lower()
 
-    def test_token_reuse_rejected(self, conn, setup, key_manager, auth_engine, proxy):
+    def test_token_reuse_rejected(self, conn, engine, setup, key_manager, auth_engine, proxy):
         """A token that has already been claimed must be rejected on second use."""
         transition, token = _propose_and_authorize(
             conn,
+            engine,
             setup["ep_service_id"],
             setup["agent_id"],
             setup,
@@ -299,10 +303,13 @@ class TestProxyTokenVerification:
             or "claim failed" in result2.result_summary.lower()
         )
 
-    def test_wrong_audience_rejected(self, conn, setup, key_manager, auth_engine, ep_service_id):
+    def test_wrong_audience_rejected(
+        self, conn, engine, setup, key_manager, auth_engine, ep_service_id
+    ):
         """A token with the wrong proxy audience must be rejected."""
         transition, token = _propose_and_authorize(
             conn,
+            engine,
             setup["ep_service_id"],
             setup["agent_id"],
             setup,
@@ -318,7 +325,7 @@ class TestProxyTokenVerification:
             proxy_audience="docker-proxy",  # different audience
             ep_service_principal_id=ep_service_id,
         )
-        wrong_proxy = PostgresProxy(conn, auth_engine, config)
+        wrong_proxy = PostgresProxy(engine, auth_engine, config)
 
         signed = token.to_signed_token(key_manager)
         payload = {"sql": "SELECT 1", "host": "localhost", "database": "test"}
@@ -330,10 +337,11 @@ class TestProxyTokenVerification:
 
 
 class TestProxySQLClassification:
-    def test_select_executed(self, conn, setup, key_manager, auth_engine, proxy):
+    def test_select_executed(self, conn, engine, setup, key_manager, auth_engine, proxy):
         """SELECT should be executed successfully."""
         transition, token = _propose_and_authorize(
             conn,
+            engine,
             setup["ep_service_id"],
             setup["agent_id"],
             setup,
@@ -352,10 +360,13 @@ class TestProxySQLClassification:
         assert result.success is True
         assert result.exit_status == "success"
 
-    def test_forbidden_operation_rejected(self, conn, setup, key_manager, auth_engine, proxy):
+    def test_forbidden_operation_rejected(
+        self, conn, engine, setup, key_manager, auth_engine, proxy
+    ):
         """TRUNCATE should be rejected as forbidden by the proxy."""
         transition, token = _propose_and_authorize(
             conn,
+            engine,
             setup["ep_service_id"],
             setup["agent_id"],
             setup,
@@ -374,7 +385,7 @@ class TestProxySQLClassification:
         assert result.success is False
         assert "forbidden" in result.result_summary.lower()
 
-    def test_no_sql_in_payload_rejected(self, conn, setup, key_manager, auth_engine, proxy):
+    def test_no_sql_in_payload_rejected(self, conn, engine, setup, key_manager, auth_engine, proxy):
         """Payload without SQL should be rejected by the proxy.
 
         The proposal uses valid SQL for classification, but the payload
@@ -382,6 +393,7 @@ class TestProxySQLClassification:
         """
         transition, token = _propose_and_authorize(
             conn,
+            engine,
             setup["ep_service_id"],
             setup["agent_id"],
             setup,
@@ -406,11 +418,12 @@ class TestProxySQLClassification:
 
 class TestProxyResultFlow:
     def test_successful_execution_returns_result(
-        self, conn, setup, key_manager, auth_engine, proxy
+        self, conn, engine, setup, key_manager, auth_engine, proxy
     ):
         """A successful execution should return a result with rows_affected."""
         transition, token = _propose_and_authorize(
             conn,
+            engine,
             setup["ep_service_id"],
             setup["agent_id"],
             setup,
@@ -432,11 +445,12 @@ class TestProxyResultFlow:
         assert result.execution_attempt_id != ""
 
     def test_execution_advances_transition_to_executing(
-        self, conn, setup, key_manager, auth_engine, proxy
+        self, conn, engine, setup, key_manager, auth_engine, proxy
     ):
         """After proxy claims the token, the transition should be in 'executing' stage."""
         transition, token = _propose_and_authorize(
             conn,
+            engine,
             setup["ep_service_id"],
             setup["agent_id"],
             setup,
@@ -462,7 +476,7 @@ class TestProxyResultFlow:
 
 
 class TestProxyRedaction:
-    def test_secret_redaction_in_output(self, conn, ep_service_id):
+    def test_secret_redaction_in_output(self, conn, engine, ep_service_id):
         """The proxy must redact secrets from output."""
         config = ProxyConfig(
             target_connection_string="sqlite:///:memory:",
@@ -474,7 +488,7 @@ class TestProxyRedaction:
         from ep_governance.authorizations import AuthorizationEngine
 
         km = KeyManager()
-        ae = AuthorizationEngine(conn, km, ep_service_id)
+        ae = AuthorizationEngine(engine, km, ep_service_id)
 
         class TestProxy(GovernedProxy):
             def _execute_adapter(self, payload, token, attempt_id):
@@ -485,6 +499,6 @@ class TestProxyRedaction:
                     result_summary=self._redact(output),
                 )
 
-        test_proxy = TestProxy(conn, ae, config)
+        test_proxy = TestProxy(engine, ae, config)
         assert "secret123" not in test_proxy._redact("password=secret123")
         assert "REDACTED" in test_proxy._redact("password=secret123")

@@ -71,18 +71,18 @@ def key_manager():
 
 
 @pytest.fixture
-def auth_engine(conn, key_manager, ep_service_id):
-    return AuthorizationEngine(conn, key_manager, ep_service_id)
+def auth_engine(engine, key_manager, ep_service_id):
+    return AuthorizationEngine(engine, key_manager, ep_service_id)
 
 
 class TestFileProxy:
-    def test_read_simulated(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_read_simulated(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig(
             target_connection_string="file:///tmp",
             proxy_audience="file-proxy",
             ep_service_principal_id=ep_service_id,
         )
-        proxy = FileProxy(conn, auth_engine, config)
+        proxy = FileProxy(engine, auth_engine, config)
         # Test the adapter directly (bypassing token verification for unit test)
         from ep_governance.authorizations import AuthorizationToken
 
@@ -108,9 +108,9 @@ class TestFileProxy:
         assert result.success is True
         assert "read" in result.result_summary.lower()
 
-    def test_chmod_forbidden(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_chmod_forbidden(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("file:///tmp", "file-proxy", ep_service_id)
-        proxy = FileProxy(conn, auth_engine, config)
+        proxy = FileProxy(engine, auth_engine, config)
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
@@ -139,9 +139,9 @@ class TestFileProxy:
             or "requires approval" in result.result_summary.lower()
         )
 
-    def test_relative_path_rejected(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_relative_path_rejected(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("file:///tmp", "file-proxy", ep_service_id)
-        proxy = FileProxy(conn, auth_engine, config)
+        proxy = FileProxy(engine, auth_engine, config)
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
@@ -166,9 +166,9 @@ class TestFileProxy:
 
 
 class TestDockerProxy:
-    def test_ps_simulated(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_ps_simulated(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("docker://localhost", "docker-proxy", ep_service_id)
-        proxy = DockerProxy(conn, auth_engine, config)
+        proxy = DockerProxy(engine, auth_engine, config)
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
@@ -190,9 +190,9 @@ class TestDockerProxy:
         result = proxy._execute_adapter({"command": "docker ps"}, token, "a1")
         assert result.success is True
 
-    def test_rm_restricted(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_rm_restricted(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("docker://localhost", "docker-proxy", ep_service_id)
-        proxy = DockerProxy(conn, auth_engine, config)
+        proxy = DockerProxy(engine, auth_engine, config)
         from ep_governance.authorizations import AuthorizationToken
 
         # Token authorizes docker.ps, not docker.rm
@@ -221,9 +221,9 @@ class TestDockerProxy:
 
 
 class TestEmailProxy:
-    def test_send_simulated(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_send_simulated(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("smtp://localhost", "email-proxy", ep_service_id)
-        proxy = EmailProxy(conn, auth_engine, config)
+        proxy = EmailProxy(engine, auth_engine, config)
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
@@ -249,9 +249,9 @@ class TestEmailProxy:
         # Body must NOT be in result_summary (privacy)
         assert "Hello" not in result.result_summary
 
-    def test_empty_recipients_rejected(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_empty_recipients_rejected(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("smtp://localhost", "email-proxy", ep_service_id)
-        proxy = EmailProxy(conn, auth_engine, config)
+        proxy = EmailProxy(engine, auth_engine, config)
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
@@ -276,9 +276,9 @@ class TestEmailProxy:
 
 
 class TestGitProxy:
-    def test_status_simulated(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_status_simulated(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("git://localhost", "git-proxy", ep_service_id)
-        proxy = GitProxy(conn, auth_engine, config)
+        proxy = GitProxy(engine, auth_engine, config)
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
@@ -303,9 +303,9 @@ class TestGitProxy:
         assert result is not None
         assert isinstance(result, ExecutionResult)
 
-    def test_force_push_forbidden(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_force_push_forbidden(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("git://localhost", "git-proxy", ep_service_id)
-        proxy = GitProxy(conn, auth_engine, config)
+        proxy = GitProxy(engine, auth_engine, config)
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
@@ -333,9 +333,9 @@ class TestGitProxy:
 
 
 class TestHTTPProxy:
-    def test_get_simulated(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_get_simulated(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("http://localhost", "http-proxy", ep_service_id)
-        proxy = HTTPProxy(conn, auth_engine, config)
+        proxy = HTTPProxy(engine, auth_engine, config)
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
@@ -359,9 +359,9 @@ class TestHTTPProxy:
         )
         assert result.success is True
 
-    def test_connect_forbidden(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_connect_forbidden(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("http://localhost", "http-proxy", ep_service_id)
-        proxy = HTTPProxy(conn, auth_engine, config)
+        proxy = HTTPProxy(engine, auth_engine, config)
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
@@ -390,9 +390,9 @@ class TestHTTPProxy:
 
 
 class TestShellProxy:
-    def test_safe_command_simulated(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_safe_command_simulated(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("shell://localhost", "shell-proxy", ep_service_id)
-        proxy = ShellProxy(conn, auth_engine, config)
+        proxy = ShellProxy(engine, auth_engine, config)
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
@@ -414,9 +414,9 @@ class TestShellProxy:
         result = proxy._execute_adapter({"command": "ls -la /tmp"}, token, "a1")
         assert result.success is True
 
-    def test_eval_opaque_rejected(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_eval_opaque_rejected(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("shell://localhost", "shell-proxy", ep_service_id)
-        proxy = ShellProxy(conn, auth_engine, config)
+        proxy = ShellProxy(engine, auth_engine, config)
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(
@@ -444,9 +444,11 @@ class TestShellProxy:
             or "dangerous" in result.result_summary.lower()
         )
 
-    def test_dangerous_command_rejected(self, conn, auth_engine, key_manager, ep_service_id):
+    def test_dangerous_command_rejected(
+        self, conn, engine, auth_engine, key_manager, ep_service_id
+    ):
         config = ProxyConfig("shell://localhost", "shell-proxy", ep_service_id)
-        proxy = ShellProxy(conn, auth_engine, config)
+        proxy = ShellProxy(engine, auth_engine, config)
         from ep_governance.authorizations import AuthorizationToken
 
         token = AuthorizationToken(

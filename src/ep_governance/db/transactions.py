@@ -79,25 +79,19 @@ def serializable_transaction(conn: Connection) -> Iterator[Connection]:
         raise TransactionOwnershipError(
             "A clean connection is required; the current connection has a pending transaction"
         )
-    if dialect == "sqlite":
-        # SQLite: use BEGIN IMMEDIATE to acquire a write lock immediately.
-        conn.execute(text("BEGIN IMMEDIATE"))
-        try:
-            yield conn
-            conn.execute(text("COMMIT"))
-        except Exception:
-            conn.execute(text("ROLLBACK"))
-            raise
-    else:
-        # PostgreSQL: use SQLAlchemy begin() with isolation level
-        trans = conn.begin()
-        try:
+    # Use SQLAlchemy's begin() for both dialects — it handles autobegin correctly.
+    # For SQLite, SERIALIZABLE is the default under IMMEDIATE; we use conn.begin()
+    # which acquires a write lock.
+    # For PostgreSQL, we set the isolation level after begin().
+    trans = conn.begin()
+    try:
+        if dialect != "sqlite":
             conn.execute(text("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"))
-            yield conn
-            trans.commit()
-        except Exception:
-            trans.rollback()
-            raise
+        yield conn
+        trans.commit()
+    except Exception:
+        trans.rollback()
+        raise
 
 
 @contextlib.contextmanager
