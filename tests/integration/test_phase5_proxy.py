@@ -44,6 +44,37 @@ from ep_governance.canonical import canonical_hash
 from ep_governance.errors import StaleHeadError
 
 
+def _build_default_policy_engine(conn):
+    """Build a PolicyEngine with a global allow-all policy for test fixtures."""
+    from ep_governance.policies import Policy
+    from ep_governance.policy_engine import PolicyEngine
+
+    _id = str(XID.new())
+    allow_policy = Policy(
+        id=_id,
+        effect="allow",
+        actions=["*"],
+        resources=["*"],
+        conditions={},
+        priority=1,
+        scope="global",
+        agent_scope=None,
+        project_id=None,
+        branch_id=None,
+        description="Test allow-all",
+        status="active",
+        created_by=_id,
+        approved_by=_id,
+        approved_at="2026-07-28T12:00:00.000000Z",
+        activation_version=1,
+        exception_to=[],
+        valid_from=None,
+        valid_until=None,
+        justification=None,
+    )
+    return PolicyEngine([allow_policy])
+
+
 def _get_db_url() -> str:
     return os.environ.get("EP_TEST_DB_URL", "sqlite:///:memory:")
 
@@ -156,12 +187,13 @@ def auth_engine(engine, key_manager, ep_service_id):
 
 
 @pytest.fixture
-def proxy(engine, auth_engine, ep_service_id, setup):
+def proxy(conn, engine, auth_engine, ep_service_id, setup):
     """Create a PostgresProxy pointed at the EP governance DB itself for testing."""
     from ep_governance.transitions import TransitionEngine
     from ep_governance.branches import BranchCommitter
 
-    trans_engine = TransitionEngine(engine, ep_service_id)
+    policy_engine = _build_default_policy_engine(conn)
+    trans_engine = TransitionEngine(engine, ep_service_id, policy_engine=policy_engine)
     committer = BranchCommitter(engine, ep_service_id)
     config = ProxyConfig(
         target_connection_string=_get_db_url(),
@@ -191,7 +223,8 @@ def _propose_and_authorize(
     if arguments is None:
         arguments = {"sql": "SELECT 1", "host": "localhost", "database": "test"}
 
-    trans_engine = TransitionEngine(engine, ep_service_id)
+    policy_engine = _build_default_policy_engine(conn)
+    trans_engine = TransitionEngine(engine, ep_service_id, policy_engine=policy_engine)
     transition = trans_engine.propose(
         agent_id=agent_id,
         branch_id=setup["branch"]["id"],

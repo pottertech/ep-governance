@@ -13,6 +13,8 @@
     "priority",
     "scope",
     "agent_scope",
+    "project_id",
+    "branch_id",
     "description",
     "status",
     "created_by",
@@ -61,13 +63,23 @@
     },
     "scope": {
       "type": "string",
-      "enum": ["global", "agent"],
-      "description": "Whether this policy is global or scoped to a specific agent."
+      "enum": ["global", "project", "branch", "agent"],
+      "description": "The scope at which this policy applies: global, project, branch, or agent."
     },
     "agent_scope": {
       "type": ["string", "null"],
       "pattern": "^[0-9a-v]{20}$",
-      "description": "The agent this policy is scoped to. Must be null when scope=global, and a valid xid when scope=agent."
+      "description": "Agent XID when scope=agent; null otherwise."
+    },
+    "project_id": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "Project XID when scope=project; null otherwise."
+    },
+    "branch_id": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-v]{20}$",
+      "description": "Branch XID when scope=branch; null otherwise."
     },
     "description": {
       "type": "string",

@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 __all__ = [
     "PolicyEffect",
@@ -38,9 +38,11 @@ class PolicyEffect(StrEnum):
 
 
 class PolicyScope(StrEnum):
-    """Whether a policy is global or scoped to a specific agent."""
+    """The scope at which a policy applies."""
 
     global_ = "global"
+    project = "project"
+    branch = "branch"
     agent = "agent"
 
 
@@ -101,11 +103,21 @@ class Policy(BaseModel):
         description="Condition object evaluated against the transition context.",
     )
     priority: int = Field(..., ge=0, description="Priority — higher values take precedence.")
-    scope: PolicyScope = Field(..., description="Global or agent scope.")
+    scope: PolicyScope = Field(..., description="Scope: global, project, branch, or agent.")
     agent_scope: str | None = Field(
         default=None,
         pattern=r"^[0-9a-v]{20}$",
-        description="Agent XID when scope=agent; null when scope=global.",
+        description="Agent XID when scope=agent; null otherwise.",
+    )
+    project_id: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-v]{20}$",
+        description="Project XID when scope=project; null otherwise.",
+    )
+    branch_id: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-v]{20}$",
+        description="Branch XID when scope=branch; null otherwise.",
     )
     description: str = Field(..., description="Human-readable description.")
     status: PolicyStatus = Field(..., description="Lifecycle status.")
@@ -140,6 +152,43 @@ class Policy(BaseModel):
         default=None,
         description="Justification for this policy or exception.",
     )
+
+    # ------------------------------------------------------------------ #
+    # Validators
+    # ------------------------------------------------------------------ #
+
+    @model_validator(mode="after")
+    def _validate_scope_consistency(self) -> Policy:
+        """Ensure scope fields are mutually consistent.
+
+        - global:  project_id, branch_id, agent_scope all None
+        - project: project_id not None; branch_id and agent_scope None
+        - branch:  branch_id not None; project_id and agent_scope None
+        - agent:   agent_scope not None; project_id and branch_id None
+        """
+        scope_val = self.scope
+        if isinstance(scope_val, PolicyScope):
+            scope_val = scope_val.value
+
+        if scope_val == "global":
+            if self.project_id is not None or self.branch_id is not None or self.agent_scope is not None:
+                raise ValueError("scope=global requires project_id, branch_id, and agent_scope to be null")
+        elif scope_val == "project":
+            if self.project_id is None:
+                raise ValueError("scope=project requires project_id to be set")
+            if self.branch_id is not None or self.agent_scope is not None:
+                raise ValueError("scope=project requires branch_id and agent_scope to be null")
+        elif scope_val == "branch":
+            if self.branch_id is None:
+                raise ValueError("scope=branch requires branch_id to be set")
+            if self.project_id is not None or self.agent_scope is not None:
+                raise ValueError("scope=branch requires project_id and agent_scope to be null")
+        elif scope_val == "agent":
+            if self.agent_scope is None:
+                raise ValueError("scope=agent requires agent_scope to be set")
+            if self.project_id is not None or self.branch_id is not None:
+                raise ValueError("scope=agent requires project_id and branch_id to be null")
+        return self
 
     # ------------------------------------------------------------------ #
     # Methods

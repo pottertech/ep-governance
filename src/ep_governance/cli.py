@@ -31,7 +31,7 @@ from .db.repositories import (
     ProjectRepository,
     TransitionRepository,
 )
-from .errors import EPError
+from .errors import EPError, PolicyIntegrityError
 from .transitions import TransitionEngine
 from .xid import XID
 
@@ -80,8 +80,8 @@ def _get_conn_with_migrations() -> Connection:
     return conn
 
 
-def _ensure_ep_service_principal(conn: Connection) -> str:
-    """Get or create the EP service principal."""
+def _ensure_ep_service_principal_in_transaction(conn: Connection) -> str:
+    """Get or create the EP service principal without committing."""
     repo = PrincipalRepository(conn)
     result = conn.execute(
         __import__("sqlalchemy").text(
@@ -98,8 +98,14 @@ def _ensure_ep_service_principal(conn: Connection) -> str:
         machine=None,
         description="Trusted EP service principal",
     )
-    conn.commit()
     return p["id"]
+
+
+def _ensure_ep_service_principal(conn: Connection) -> str:
+    """Get or create the EP service principal and commit standalone use."""
+    ep_id = _ensure_ep_service_principal_in_transaction(conn)
+    conn.commit()
+    return ep_id
 
 
 def _output(data: Any, json_mode: bool = False) -> None:
@@ -393,6 +399,47 @@ def retire_policy(
         raise typer.Exit(1)
 
 
+def _build_policy_engine_cli(conn, branch_id: str | None = None, agent_id: str | None = None):
+    """Load active policies and build a PolicyEngine for the given context."""
+    from .policies import Policy
+    from .policy_engine import PolicyEngine
+    from .db.repositories import PolicyRepository
+
+    repo = PolicyRepository(conn)
+    project_id = None
+    if branch_id:
+        # Resolve project_id from branch_id
+        import sqlalchemy as _sa
+        result = conn.execute(
+            _sa.text(
+                "SELECT l.project_id FROM ep_branches b "
+                "JOIN ep_lattices l ON b.lattice_id = l.id "
+                "WHERE b.id = :bid"
+            ),
+            {"bid": branch_id},
+        )
+        row = result.fetchone()
+        if row:
+            project_id = row[0]
+
+    if not branch_id or not project_id or not agent_id:
+        raise PolicyIntegrityError(
+            "branch_id, project_id, and agent_id are required for governed policy evaluation"
+        )
+
+    policy_rows = repo.list_effective_policies(project_id, branch_id, agent_id)
+    policies = []
+    for row in policy_rows:
+        try:
+            policies.append(Policy.model_validate(row))
+        except Exception as exc:
+            raise PolicyIntegrityError(
+                f"Active policy {row.get('id', '<unknown>')} is invalid"
+            ) from exc
+
+    return PolicyEngine(policies)
+
+
 # ---------------------------------------------------------------------------
 # Check and execute
 # ---------------------------------------------------------------------------
@@ -402,7 +449,7 @@ def retire_policy(
 def check(
     tool: str = typer.Option(..., "--tool", help="Tool name."),
     arguments: str = typer.Option(..., "--arguments", help="JSON arguments."),
-    branch: str = typer.Option(None, "--branch", help="Branch XID."),
+    branch: str = typer.Option(..., "--branch", help="Branch XID (required for governed evaluation)."),
     agent: str = typer.Option(..., "--agent", help="Agent principal XID."),
     json: bool = typer.Option(False, "--json", help="Output as JSON."),
 ) -> None:
@@ -413,7 +460,8 @@ def check(
         import json as json_mod
 
         args = json_mod.loads(arguments)
-        trans_engine = TransitionEngine(conn.engine, ep_id)
+        policy_engine = _build_policy_engine_cli(conn, branch_id=branch, agent_id=agent)
+        trans_engine = TransitionEngine(conn.engine, ep_id, policy_engine=policy_engine)
         transition = trans_engine.propose(
             agent_id=agent,
             branch_id=branch or "",
@@ -444,7 +492,8 @@ def execute(
         import json as json_mod
 
         args = json_mod.loads(arguments)
-        trans_engine = TransitionEngine(conn.engine, ep_id)
+        policy_engine = _build_policy_engine_cli(conn, branch_id=branch, agent_id=agent)
+        trans_engine = TransitionEngine(conn.engine, ep_id, policy_engine=policy_engine)
         transition = trans_engine.propose(
             agent_id=agent,
             branch_id=branch,
@@ -477,7 +526,21 @@ def status(
             branch_repo = BranchRepository(conn)
             head_id, version = branch_repo.get_head(branch)
             policy_repo = PolicyRepository(conn)
-            policies = policy_repo.list_active_policies()
+            # Resolve project_id from branch for scoped policy count
+            import sqlalchemy as _sa
+            proj_result = conn.execute(
+                _sa.text(
+                    "SELECT l.project_id FROM ep_branches b "
+                    "JOIN ep_lattices l ON b.lattice_id = l.id "
+                    "WHERE b.id = :bid"
+                ),
+                {"bid": branch},
+            )
+            proj_row = proj_result.fetchone()
+            if proj_row:
+                policies = policy_repo.list_active_policies_for_project(proj_row[0])
+            else:
+                policies = []
             _output(
                 {
                     "branch_id": branch,
@@ -664,6 +727,217 @@ def deny(
                 "approval_id": approval_id,
                 "transition_id": req["transition_id"],
                 "stage": result["stage"],
+            },
+            json,
+        )
+    except EPError as exc:
+        _error(str(exc), json)
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap administrator
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def bootstrap_admin(
+    principal: str = typer.Option(..., "--principal", help="Principal XID to bind as administrator."),
+    bootstrap_token: str = typer.Option(
+        None, "--bootstrap-token", help="High-entropy bootstrap credential (or EP_BOOTSTRAP_TOKEN env var)."
+    ),
+    json: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """One-time secure administrator enrollment.
+
+    Requires a separate high-entropy bootstrap credential (provided via
+    --bootstrap-token or the EP_BOOTSTRAP_TOKEN environment variable).
+    The supplied token is verified against ``bootstrap_token_hash`` in the
+    loaded configuration (set via the ``EP_BOOTSTRAP_TOKEN_HASH`` environment
+    variable) using a constant-time SHA-256 comparison.  The plaintext token
+    is never stored.
+
+    All checks and enrollment happen inside a single SERIALIZABLE
+    transaction with a singleton constraint on ``ep_bootstrap_state``
+    (``singleton_id = 1``), eliminating the TOCTOU race where two operators
+    could bootstrap concurrently.  All subsequent bootstrap attempts are
+    rejected.
+
+    Generate a token and its hash with:
+        python3 -c "import secrets, hashlib; t=secrets.token_urlsafe(32); print(t, hashlib.sha256(t.encode()).hexdigest())"
+    """
+    import os as _os
+    import sqlalchemy as _sa
+    from .xid import XID as _XID
+    from .db.transactions import serializable_transaction
+    from .audit import AuditWriter
+
+    # Allow environment variable override (avoids CLI history leakage)
+    token = bootstrap_token or _os.environ.get("EP_BOOTSTRAP_TOKEN", "")
+    if not token:
+        _error("Bootstrap token required. Use --bootstrap-token or set EP_BOOTSTRAP_TOKEN env var.", json)
+        raise typer.Exit(1)
+
+    # Load config to obtain the configured bootstrap token hash
+    cfg = load_config()
+    configured_hash = cfg.bootstrap_token_hash
+    if not configured_hash:
+        _error(
+            "Bootstrap token hash must be configured before running bootstrap-admin. "
+            "Set EP_BOOTSTRAP_TOKEN_HASH environment variable.",
+            json,
+        )
+        raise typer.Exit(1)
+
+    try:
+        conn = _get_conn_with_migrations()
+
+        # Commit any pending autobegun transaction (from migrations) so the
+        # serializable_transaction context manager receives a clean connection.
+        if conn.in_transaction():
+            conn.commit()
+
+        # --- ALL reads and writes inside ONE serializable transaction ---
+        with serializable_transaction(conn):
+            # a. Check ep_bootstrap_state singleton — reject if already completed
+            bs_result = conn.execute(
+                _sa.text("SELECT completed FROM ep_bootstrap_state WHERE singleton_id = 1")
+            )
+            bs_row = bs_result.fetchone()
+            if bs_row is not None and bs_row[0]:
+                _error(
+                    "Bootstrap is already complete. Administrator enrollment is a one-time operation.",
+                    json,
+                )
+                raise typer.Exit(1)
+
+            # b. Verify no administrator role binding exists
+            result = conn.execute(
+                _sa.text(
+                    "SELECT rb.id FROM ep_role_bindings rb "
+                    "JOIN ep_roles r ON rb.role_id = r.id "
+                    "WHERE r.name = 'administrator' LIMIT 1"
+                )
+            )
+            if result.fetchone() is not None:
+                _error("An administrator role binding already exists. Bootstrap is not needed.", json)
+                raise typer.Exit(1)
+
+            # c. Verify the principal exists and is a human
+            principal_repo = PrincipalRepository(conn)
+            p = principal_repo.get_principal(principal)
+            if p is None:
+                _error(f"Principal '{principal}' not found.", json)
+                raise typer.Exit(1)
+            if p.get("type") != "human":
+                _error(f"Principal must be type 'human', got '{p.get('type')}'.", json)
+                raise typer.Exit(1)
+
+            # d. Verify bootstrap token hash (constant-time compare)
+            import hashlib
+            import secrets
+
+            token_hash = hashlib.sha256(token.encode()).hexdigest()
+            if not secrets.compare_digest(token_hash, configured_hash):
+                _error("Bootstrap token verification failed.", json)
+                raise typer.Exit(1)
+
+            # e. Ensure EP service principal exists (NO commit — caller owns tx)
+            ep_id = _ensure_ep_service_principal_in_transaction(conn)
+
+            # f. Create or find administrator role
+            result = conn.execute(
+                _sa.text("SELECT id FROM ep_roles WHERE name = 'administrator' LIMIT 1")
+            )
+            role_row = result.fetchone()
+            if role_row is not None:
+                role_id = role_row[0]
+            else:
+                role_id = str(_XID.new())
+                conn.execute(
+                    _sa.text(
+                        "INSERT INTO ep_roles (id, name, permissions) VALUES (:id, 'administrator', :perms)"
+                    ),
+                    {"id": role_id, "perms": '["*"]'},
+                )
+
+            # g. Bind the principal as administrator (global scope)
+            binding_id = str(_XID.new())
+            conn.execute(
+                _sa.text(
+                    "INSERT INTO ep_role_bindings (id, principal_id, role_id, project_id) "
+                    "VALUES (:id, :principal_id, :role_id, NULL)"
+                ),
+                {"id": binding_id, "principal_id": principal, "role_id": role_id},
+            )
+
+            # h. Record bootstrap completion in the singleton row.
+            #    Use INSERT OR IGNORE (SQLite) / INSERT ON CONFLICT DO NOTHING
+            #    (Postgres) to create the initial row, then UPDATE it.
+            dialect = conn.dialect.name
+            if dialect == "sqlite":
+                conn.execute(
+                    _sa.text(
+                        "INSERT OR IGNORE INTO ep_bootstrap_state (singleton_id, completed, completed_by) "
+                        "VALUES (1, FALSE, :completed_by)"
+                    ),
+                    {"completed_by": principal},
+                )
+                conn.execute(
+                    _sa.text(
+                        "UPDATE ep_bootstrap_state "
+                        "SET completed = TRUE, completed_by = :completed_by, "
+                        "    completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') "
+                        "WHERE singleton_id = 1"
+                    ),
+                    {"completed_by": principal},
+                )
+            else:
+                conn.execute(
+                    _sa.text(
+                        "INSERT INTO ep_bootstrap_state (singleton_id, completed, completed_by) "
+                        "VALUES (1, FALSE, :completed_by) "
+                        "ON CONFLICT (singleton_id) DO NOTHING"
+                    ),
+                    {"completed_by": principal},
+                )
+                conn.execute(
+                    _sa.text(
+                        "UPDATE ep_bootstrap_state "
+                        "SET completed = TRUE, completed_by = :completed_by, "
+                        "    completed_at = NOW() "
+                        "WHERE singleton_id = 1"
+                    ),
+                    {"completed_by": principal},
+                )
+
+            # i. Write audit event in the SAME transaction
+            lat_result = conn.execute(_sa.text("SELECT id FROM ep_lattices LIMIT 1"))
+            lat_row = lat_result.fetchone()
+            lattice_id = lat_row[0] if lat_row is not None else None
+
+            if lattice_id is not None:
+                writer = AuditWriter(conn.engine, ep_id)
+                writer.write_event_in_transaction(
+                    conn,
+                    lattice_id=lattice_id,
+                    event_type="bootstrap.admin_enrolled",
+                    event_data={
+                        "principal_id": principal,
+                        "role": "administrator",
+                        "binding_id": binding_id,
+                    },
+                    actor_principal_id=principal,
+                    authenticated_caller_id=principal,
+                )
+
+        conn.close()
+        _output(
+            {
+                "status": "bootstrap_complete",
+                "principal_id": principal,
+                "role": "administrator",
+                "binding_id": binding_id,
             },
             json,
         )

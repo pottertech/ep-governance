@@ -49,6 +49,8 @@ def _make_policy(
     priority: int = 50,
     scope: PolicyScope = PolicyScope.global_,
     agent_scope: str | None = None,
+    project_id: str | None = None,
+    branch_id: str | None = None,
     status: PolicyStatus = PolicyStatus.active,
     valid_from: str | None = None,
     valid_until: str | None = None,
@@ -67,6 +69,8 @@ def _make_policy(
         priority=priority,
         scope=scope,
         agent_scope=agent_scope,
+        project_id=project_id,
+        branch_id=branch_id,
         description=description,
         status=status,
         created_by=created_by,
@@ -250,7 +254,9 @@ class TestOverrideControls:
             approved_by=XID_2,
         )
         engine = PolicyEngine([deny_p, allow_p])
-        result = engine.evaluate(ACTION, RESOURCES)
+        result = engine.evaluate(
+            ACTION, RESOURCES, context={"agent_id": XID_2}
+        )
         # Override granted -> deny is overridden -> allow
         assert result.effect == "allow"
         assert result.conflict is False
@@ -269,7 +275,7 @@ class TestOverrideControls:
             approved_by=XID_2,
         )
         engine = PolicyEngine([deny_p, allow_p])
-        result = engine.evaluate(ACTION, RESOURCES)
+        result = engine.evaluate(ACTION, RESOURCES, context={"agent_id": XID_2})
         assert result.effect == "deny"
 
     def test_override_missing_narrower_scope_fails(self):
@@ -291,7 +297,7 @@ class TestOverrideControls:
             approved_by=XID_2,
         )
         engine = PolicyEngine([deny_p, allow_p])
-        result = engine.evaluate(ACTION, RESOURCES)
+        result = engine.evaluate(ACTION, RESOURCES, context={"agent_id": XID_2})
         assert result.effect == "deny"
 
     def test_override_missing_valid_until_fails(self):
@@ -308,7 +314,7 @@ class TestOverrideControls:
             approved_by=XID_2,
         )
         engine = PolicyEngine([deny_p, allow_p])
-        result = engine.evaluate(ACTION, RESOURCES)
+        result = engine.evaluate(ACTION, RESOURCES, context={"agent_id": XID_2})
         assert result.effect == "deny"
 
     def test_override_missing_justification_fails(self):
@@ -325,7 +331,7 @@ class TestOverrideControls:
             approved_by=XID_2,
         )
         engine = PolicyEngine([deny_p, allow_p])
-        result = engine.evaluate(ACTION, RESOURCES)
+        result = engine.evaluate(ACTION, RESOURCES, context={"agent_id": XID_2})
         assert result.effect == "deny"
 
     def test_override_missing_approved_by_fails(self):
@@ -342,7 +348,7 @@ class TestOverrideControls:
             justification="No approved_by",
         )
         engine = PolicyEngine([deny_p, allow_p])
-        result = engine.evaluate(ACTION, RESOURCES)
+        result = engine.evaluate(ACTION, RESOURCES, context={"agent_id": XID_2})
         assert result.effect == "deny"
 
 
@@ -369,7 +375,7 @@ class TestPriorityAloneDoesNotOverride:
             # No exception_to, no override controls
         )
         engine = PolicyEngine([deny_p, allow_p])
-        result = engine.evaluate(ACTION, RESOURCES)
+        result = engine.evaluate(ACTION, RESOURCES, context={"agent_id": XID_2})
         # Deny wins because priority alone does not override deny
         assert result.effect == "deny"
         # Both policies are in matched_policies
@@ -618,3 +624,27 @@ class TestPolicyResolution:
         assert res.matched_policies == []
         assert res.conflict is False
         assert res.warnings == ["test"]
+
+
+class TestMissingScopeContextFailsClosed:
+    def test_agent_scope_without_agent_context_requires_approval(self):
+        p = _make_policy(
+            pid=XID,
+            effect=PolicyEffect.deny,
+            scope=PolicyScope.agent,
+            agent_scope=XID_2,
+        )
+        result = PolicyEngine([p]).evaluate(ACTION, RESOURCES)
+        assert result.effect == "require_approval"
+        assert any("agent_id is required" in warning for warning in result.warnings)
+
+    def test_branch_scope_without_branch_context_requires_approval(self):
+        p = _make_policy(
+            pid=XID,
+            effect=PolicyEffect.deny,
+            scope=PolicyScope.branch,
+            branch_id=XID_2,
+        )
+        result = PolicyEngine([p]).evaluate(ACTION, RESOURCES)
+        assert result.effect == "require_approval"
+        assert any("branch_id is required" in warning for warning in result.warnings)

@@ -58,6 +58,14 @@ class PolicyNotFoundError(PolicyError):
     """A referenced policy does not exist."""
 
 
+class MissingPolicyContextError(PolicyError):
+    """Required project, branch, or agent context is missing for scoped policy evaluation."""
+
+
+class PolicyIntegrityError(PolicyError):
+    """An active policy could not be parsed or validated; enforcement must fail closed."""
+
+
 class OverrideError(PolicyError):
     """An override attempt does not satisfy all required controls."""
 

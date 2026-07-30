@@ -22,12 +22,13 @@ from __future__ import annotations
 import json
 import math
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Mapping
 
 __all__ = [
     "canonical_json",
     "canonical_json_bytes",
     "canonical_hash",
+    "compute_policy_set_hash",
 ]
 
 
@@ -59,6 +60,22 @@ def canonical_hash(obj: Any) -> str:
     import hashlib
 
     return hashlib.sha256(canonical_json_bytes(obj)).hexdigest()
+
+
+def compute_policy_set_hash(matched_policy_versions: Mapping[str, int]) -> str:
+    """Compute a deterministic SHA-256 hash of the effective policy set.
+
+    Takes a mapping of policy_id → activation_version, sorts by policy_id,
+    and computes the canonical hash of the sorted (id, version) pairs.
+
+    This function MUST be used everywhere a policy-set hash is computed:
+    - TransitionEngine.propose() (transition record)
+    - AuthorizationEngine.issue_authorization() (authorization token)
+    - GovernedProxy.execute() (stale-policy revalidation)
+    """
+    if not matched_policy_versions:
+        return ""
+    return canonical_hash(sorted(matched_policy_versions.items()))
 
 
 # ---------------------------------------------------------------------------

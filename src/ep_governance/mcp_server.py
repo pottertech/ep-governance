@@ -28,7 +28,8 @@ from .db.repositories import (
     PolicyRepository,
     PrincipalRepository,
 )
-from .errors import EPError
+from .errors import PolicyIntegrityError, EPError
+from .policy_engine import PolicyEngine
 from .transitions import TransitionEngine
 from .xid import XID
 
@@ -648,12 +649,58 @@ def _resolve_project_id(
     return None
 
 
+def _build_policy_engine(
+    conn: Any,
+    branch_id: str | None = None,
+    agent_id: str | None = None,
+) -> PolicyEngine | None:
+    """Load active policies for the given context and build a PolicyEngine.
+
+    Resolves the project_id from the branch_id, loads policies applicable
+    to that project (global + project-scoped + branch-scoped), validates
+    them into Policy models, and returns a configured PolicyEngine.
+
+    Raises PolicyIntegrityError if required context is missing or an active
+    policy cannot be validated.
+    """
+    from .policies import Policy
+    from .db.repositories import PolicyRepository
+
+    repo = PolicyRepository(conn)
+    project_id = None
+    if branch_id:
+        project_id = _resolve_project_id(conn, branch_id=branch_id)
+
+    if not branch_id or not project_id or not agent_id:
+        raise PolicyIntegrityError(
+            "branch_id, project_id, and agent_id are required for governed policy evaluation"
+        )
+
+    policy_rows = repo.list_effective_policies(project_id, branch_id, agent_id)
+    policies: list[Policy] = []
+    for row in policy_rows:
+        try:
+            policies.append(Policy.model_validate(row))
+        except Exception as exc:
+            raise PolicyIntegrityError(
+                f"Active policy {row.get('id', '<unknown>')} is invalid"
+            ) from exc
+
+    return PolicyEngine(policies)
+
+
 def _ep_check(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any]:
     ep_id = _get_ep_service_id(conn)
-    trans_engine = TransitionEngine(conn.engine, ep_id)
+    branch_id = args.get("branch_id")
+    if not branch_id:
+        raise PolicyIntegrityError("branch_id is required for governed checks")
+    policy_engine = _build_policy_engine(
+        conn, branch_id=branch_id if branch_id else None, agent_id=agent_id
+    )
+    trans_engine = TransitionEngine(conn.engine, ep_id, policy_engine=policy_engine)
     transition = trans_engine.propose(
         agent_id=agent_id,
-        branch_id=args.get("branch_id", ""),
+        branch_id=branch_id,
         tool=args["tool"],
         arguments=args["arguments"],
         idempotency_key=str(XID.new()),
@@ -663,10 +710,14 @@ def _ep_check(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any]:
 
 def _ep_execute(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any]:
     ep_id = _get_ep_service_id(conn)
-    trans_engine = TransitionEngine(conn.engine, ep_id)
+    branch_id = args["branch_id"]
+    policy_engine = _build_policy_engine(
+        conn, branch_id=branch_id, agent_id=agent_id
+    )
+    trans_engine = TransitionEngine(conn.engine, ep_id, policy_engine=policy_engine)
     transition = trans_engine.propose(
         agent_id=agent_id,
-        branch_id=args["branch_id"],
+        branch_id=branch_id,
         tool=args["tool"],
         arguments=args["arguments"],
         idempotency_key=str(XID.new()),
@@ -682,7 +733,11 @@ def _ep_status(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
     repo = BranchRepository(conn)
     head_id, version = repo.get_head(branch_id)
     policy_repo = PolicyRepository(conn)
-    policies = policy_repo.list_active_policies()
+    project_id = _resolve_project_id(conn, branch_id=branch_id)
+    if project_id:
+        policies = policy_repo.list_active_policies_for_project(project_id)
+    else:
+        policies = []
     return {
         "branch_id": branch_id,
         "head_node_id": head_id,
@@ -718,11 +773,10 @@ def _ep_log(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
 
 
 def _ep_list_policies(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
-    # High fix 5: filter by project_id to prevent cross-project data leakage.
-    # ep_policies has no direct project_id column — policies are global or
-    # agent-scoped.  However, we still require a project context (via
-    # project_id or branch_id) so the caller is scoped to a single project.
-    # If no project context is provided, return empty results.
+    # Filter policies by authoritative scope: global policies are visible to
+    # all projects, project-scoped policies are visible only within their
+    # project, and branch-scoped policies are visible only within branches of
+    # the project's lattice.  A project context is required.
     project_id = _resolve_project_id(conn, branch_id=args.get("branch_id"))
     if project_id is None and args.get("project_id"):
         project_id = args.get("project_id")
@@ -730,7 +784,7 @@ def _ep_list_policies(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
         return {"policies": []}
 
     repo = PolicyRepository(conn)
-    policies = repo.list_active_policies()
+    policies = repo.list_active_policies_for_project(project_id)
     return {"policies": policies}
 
 

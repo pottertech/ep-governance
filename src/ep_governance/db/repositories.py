@@ -368,6 +368,8 @@ class PolicyRepository(Repository):
             "agent_scope": policy_dict.get("agent_scope")
             if policy_dict.get("agent_scope")
             else None,
+            "project_id": policy_dict.get("project_id"),
+            "branch_id": policy_dict.get("branch_id"),
             "description": policy_dict.get("description"),
             "created_by": policy_dict.get("created_by"),
             "approved_by": policy_dict.get("approved_by"),
@@ -384,13 +386,14 @@ class PolicyRepository(Repository):
             text(
                 "INSERT INTO ep_policies "
                 "(id, effect, actions, resources, conditions, priority, scope, "
-                " agent_scope, description, created_by, approved_by, approved_at, "
-                " activation_version, exception_to, valid_from, valid_until, "
-                " status, created_at, updated_at) "
+                " agent_scope, project_id, branch_id, description, created_by, "
+                " approved_by, approved_at, activation_version, exception_to, "
+                " valid_from, valid_until, status, created_at, updated_at) "
                 "VALUES (:id, :effect, :actions, :resources, :conditions, :priority, "
-                "        :scope, :agent_scope, :description, :created_by, :approved_by, "
-                "        :approved_at, :activation_version, :exception_to, :valid_from, "
-                "        :valid_until, :status, :created_at, :updated_at)"
+                "        :scope, :agent_scope, :project_id, :branch_id, :description, "
+                "        :created_by, :approved_by, :approved_at, :activation_version, "
+                "        :exception_to, :valid_from, :valid_until, :status, "
+                "        :created_at, :updated_at)"
             ),
             params,
         )
@@ -406,14 +409,14 @@ class PolicyRepository(Repository):
         if row is None:
             return None
         d = _row_to_dict(row)
-        # Deserialise JSON columns
-        for col in ("actions", "resources", "conditions", "agent_scope", "exception_to"):
+        # Deserialise JSON columns (agent_scope is TEXT, not JSON)
+        for col in ("actions", "resources", "conditions", "exception_to"):
             if col in d and isinstance(d[col], str):
                 d[col] = _json_loads(d[col])
         return d
 
     def list_active_policies(self) -> list[dict[str, Any]]:
-        """Return all policies with status 'active'."""
+        """Return all policies with status 'active' (backward-compatible)."""
         result = self.conn.execute(
             text(
                 "SELECT * FROM ep_policies WHERE status = 'active' ORDER BY priority DESC, created_at"
@@ -423,7 +426,76 @@ class PolicyRepository(Repository):
         out = []
         for r in rows:
             d = dict(r._mapping)
-            for col in ("actions", "resources", "conditions", "agent_scope", "exception_to"):
+            for col in ("actions", "resources", "conditions", "exception_to"):
+                if col in d and isinstance(d[col], str):
+                    d[col] = _json_loads(d[col])
+            out.append(d)
+        return out
+
+    def list_active_policies_for_project(self, project_id: str) -> list[dict[str, Any]]:
+        """Return active policies visible to a project.
+
+        Includes:
+        - global policies (scope='global')
+        - project-scoped policies matching *project_id* (scope='project')
+        - branch-scoped policies for any branch in the project's lattice (scope='branch')
+        """
+        result = self.conn.execute(
+            text(
+                "SELECT * FROM ep_policies "
+                "WHERE status = 'active' "
+                "  AND (scope = 'global' "
+                "       OR (scope = 'project' AND project_id = :pid) "
+                "       OR (scope = 'branch' AND branch_id IN ("
+                "           SELECT b.id FROM ep_branches b "
+                "           JOIN ep_lattices l ON b.lattice_id = l.id "
+                "           WHERE l.project_id = :pid))) "
+                "ORDER BY priority DESC, created_at"
+            ),
+            {"pid": project_id},
+        )
+        rows = result.fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r._mapping)
+            for col in ("actions", "resources", "conditions", "exception_to"):
+                if col in d and isinstance(d[col], str):
+                    d[col] = _json_loads(d[col])
+            out.append(d)
+        return out
+
+    def list_effective_policies(
+        self,
+        project_id: str,
+        branch_id: str,
+        agent_id: str,
+    ) -> list[dict[str, Any]]:
+        """Return active policies applicable to one exact evaluation context.
+
+        Includes global policies, policies for the exact project, policies for
+        the exact branch, and policies for the exact agent.
+        """
+        result = self.conn.execute(
+            text(
+                "SELECT * FROM ep_policies "
+                "WHERE status = 'active' "
+                "  AND (scope = 'global' "
+                "       OR (scope = 'project' AND project_id = :project_id) "
+                "       OR (scope = 'branch' AND branch_id = :branch_id) "
+                "       OR (scope = 'agent' AND agent_scope = :agent_id)) "
+                "ORDER BY priority DESC, created_at"
+            ),
+            {
+                "project_id": project_id,
+                "branch_id": branch_id,
+                "agent_id": agent_id,
+            },
+        )
+        rows = result.fetchall()
+        out: list[dict[str, Any]] = []
+        for r in rows:
+            d = dict(r._mapping)
+            for col in ("actions", "resources", "conditions", "exception_to"):
                 if col in d and isinstance(d[col], str):
                     d[col] = _json_loads(d[col])
             out.append(d)
@@ -831,11 +903,17 @@ class ApprovalRepository(Repository):
     def create_request(
         self,
         transition_id: str,
-        policy_id: str,
         requested_by: str,
         justification: str,
+        policy_id: str | None = None,
     ) -> dict[str, Any]:
-        """Create an approval request and return the stored row."""
+        """Create an approval request and return the stored row.
+
+        The ``policy_id`` is optional — when multiple policies trigger
+        approval, the association table ``ep_approval_request_policies``
+        records all of them.  The singular ``policy_id`` column is kept
+        for backward compatibility but may be NULL.
+        """
         request_id = _new_id()
         now = _now_iso()
         self.conn.execute(
@@ -933,6 +1011,50 @@ class ApprovalRepository(Repository):
         if result.rowcount == 0:
             return None
         return self.get_request(request_id)
+
+    def add_policies(self, request_id: str, policy_ids: list[str]) -> None:
+        """Associate *policy_ids* with approval request *request_id*.
+
+        Inserts rows into ``ep_approval_request_policies`` for each policy_id.
+        Idempotent: existing rows are skipped (INSERT OR IGNORE on SQLite,
+        ON CONFLICT DO NOTHING on PostgreSQL).
+        """
+        if not policy_ids:
+            return
+        dialect = self.conn.dialect.name
+        if dialect == "sqlite":
+            stmt = (
+                "INSERT OR IGNORE INTO ep_approval_request_policies "
+                "(approval_request_id, policy_id) "
+                "VALUES (:approval_request_id, :policy_id)"
+            )
+        else:
+            stmt = (
+                "INSERT INTO ep_approval_request_policies "
+                "(approval_request_id, policy_id) "
+                "VALUES (:approval_request_id, :policy_id) "
+                "ON CONFLICT (approval_request_id, policy_id) DO NOTHING"
+            )
+        for policy_id in policy_ids:
+            self.conn.execute(
+                text(stmt),
+                {
+                    "approval_request_id": request_id,
+                    "policy_id": policy_id,
+                },
+            )
+
+    def get_policies(self, request_id: str) -> list[str]:
+        """Return the list of policy_ids associated with *request_id*."""
+        result = self.conn.execute(
+            text(
+                "SELECT policy_id FROM ep_approval_request_policies "
+                "WHERE approval_request_id = :approval_request_id "
+                "ORDER BY policy_id"
+            ),
+            {"approval_request_id": request_id},
+        )
+        return [row[0] for row in result.fetchall()]
 
 
 # ---------------------------------------------------------------------------

@@ -61,6 +61,7 @@ class Config:
     nats_url: str = ""
     token_ttl_seconds: int = 300
     dev: bool = False
+    bootstrap_token_hash: str | None = None
 
 
 def load_config(env: dict[str, str] | None = None) -> Config:
@@ -120,4 +121,5 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         nats_url=e.get("EP_NATS_URL", ""),
         token_ttl_seconds=token_ttl,
         dev=dev,
+        bootstrap_token_hash=e.get("EP_BOOTSTRAP_TOKEN_HASH") or None,
     )

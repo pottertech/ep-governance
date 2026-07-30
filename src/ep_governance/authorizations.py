@@ -27,13 +27,17 @@ import json
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import sqlalchemy as sa
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Connection
+
 from nacl.encoding import RawEncoder
 from nacl.signing import SigningKey, VerifyKey
 
-from .canonical import canonical_hash, canonical_json, canonical_json_bytes
+from .canonical import canonical_hash, canonical_json, canonical_json_bytes, compute_policy_set_hash
 from .db.repositories import AuthorizationRepository, TransitionRepository
 from .db.transactions import transaction
 from .errors import (
@@ -337,8 +341,7 @@ class AuthorizationEngine:
             matched_policy_versions[str(pid)] = int(version)
 
         # 3. Compute policy_set_hash from sorted list of (id, version).
-        policy_pairs = sorted(matched_policy_versions.items())
-        policy_set_hash = canonical_hash(policy_pairs)
+        policy_set_hash = compute_policy_set_hash(matched_policy_versions)
 
         # 4. Timestamps: ISO 8601 UTC with microseconds + Z.
         now = datetime.now(UTC)
@@ -420,7 +423,46 @@ class AuthorizationEngine:
     ) -> dict[str, Any] | None:
         """Verify a token signature, payload hash, and atomically claim it.
 
-        This is the proxy-side entry point.  The proxy:
+        This is a convenience wrapper that opens its **own** connection and
+        transaction.  Callers that already hold a transaction (e.g. a
+        ``serializable_transaction`` in the proxy) should call
+        :meth:`verify_and_claim_in_transaction` instead, passing their
+        existing connection, so that policy revalidation and token claim
+        share the same transaction (TOCTOU fix).
+
+        See :meth:`verify_and_claim_in_transaction` for the full step-by-step
+        description.
+        """
+        with self.engine.connect() as conn, transaction(conn):
+            return self.verify_and_claim_in_transaction(
+                conn,
+                authorization_id,
+                signed_token,
+                payload_hash,
+                proxy_principal_id,
+                public_key,
+            )
+
+    def verify_and_claim_in_transaction(
+        self,
+        conn: Connection,
+        authorization_id: str,
+        signed_token: str,
+        payload_hash: str,
+        proxy_principal_id: str,
+        public_key: VerifyKey,
+    ) -> dict[str, Any] | None:
+        """Verify a token signature, payload hash, and atomically claim it.
+
+        This variant accepts a caller-supplied connection so the claim can
+        participate in the caller's existing transaction (e.g. the proxy's
+        ``serializable_transaction``).  It does **not** open its own
+        connection or top-level transaction — the caller owns those.  A
+        SAVEPOINT (``conn.begin_nested()``) is still used for the
+        claim-and-transition-advancement so a failed advancement rolls back
+        only the claim, not the caller's entire transaction.
+
+        The proxy:
           1. Parses and verifies the token signature using the EP public key.
           2. Confirms the payload hash matches the authorized one.
           3. Computes the SHA-256 hash of the presented signed token and
@@ -432,8 +474,8 @@ class AuthorizationEngine:
              clause (EP-AUTH-009/010).
           5. Advances the transition to ``'executing'`` with a stage guard
              (``WHERE stage = 'authorized'``).  The claim and transition
-             advancement occur in a single SAVEPOINT transaction; if the
-             advancement fails the claim is rolled back.
+             advancement occur in a single SAVEPOINT; if the advancement
+             fails the claim is rolled back.
           6. Generates and persists an ``execution_attempt_id`` on the
              authorization record.
           7. Returns a dict with the claimed authorization + execution attempt ID.
@@ -443,11 +485,13 @@ class AuthorizationEngine:
         stage), returns ``None``.
 
         Args:
-            authorization_id:    The XID of the authorization to claim.
-            signed_token:        The full signed token JSON string.
-            payload_hash:        The payload hash the proxy observed.
-            proxy_principal_id:  XID of the proxy claiming the token.
-            public_key:          The EP's :class:`VerifyKey`.
+            conn:               Caller-supplied connection (already inside a
+                                transaction).  Must not be ``None``.
+            authorization_id:   The XID of the authorization to claim.
+            signed_token:       The full signed token JSON string.
+            payload_hash:       The payload hash the proxy observed.
+            proxy_principal_id: XID of the proxy claiming the token.
+            public_key:         The EP's :class:`VerifyKey`.
 
         Returns:
             A dict with the claimed authorization fields and
@@ -491,68 +535,68 @@ class AuthorizationEngine:
         #    the authorization record within the same transaction as the claim.
         execution_attempt_id = str(XID.new())
 
-        # 7. Acquire a fresh connection and atomically claim the authorization
-        #    and advance the transition in a single transaction.  If the
-        #    transition advancement fails, the claim is rolled back so the
-        #    authorization is not left marked as used.
-        with self.engine.connect() as conn, transaction(conn):
-            auth_repo = AuthorizationRepository(conn)
-            transition_repo = TransitionRepository(conn)
+        # 7. Use the caller-supplied connection to atomically claim the
+        #    authorization and advance the transition.  A SAVEPOINT
+        #    (conn.begin_nested()) wraps the claim + transition advancement so
+        #    a failed advancement rolls back only the claim, not the caller's
+        #    entire transaction.
+        auth_repo = AuthorizationRepository(conn)
+        transition_repo = TransitionRepository(conn)
 
-            stored_auth = auth_repo.get_authorization(authorization_id)
-            if stored_auth is None:
-                return None
-            stored_token_hash = stored_auth.get("token_hash", "")
-            if not stored_token_hash or presented_token_hash != stored_token_hash:
-                return None
+        stored_auth = auth_repo.get_authorization(authorization_id)
+        if stored_auth is None:
+            return None
+        stored_token_hash = stored_auth.get("token_hash", "")
+        if not stored_token_hash or presented_token_hash != stored_token_hash:
+            return None
 
-            savepoint = conn.begin_nested()
-            try:
-                claimed = auth_repo.claim_authorization(
-                    authorization_id,
-                    proxy_principal_id,
-                    token_hash=presented_token_hash,
-                )
-                if claimed is None:
-                    savepoint.rollback()
-                    return None
-
-                # Persist the execution_attempt_id on the authorization record.
-                auth_repo.update_execution_attempt_id(authorization_id, execution_attempt_id)
-
-                # Advance the transition to 'executing', guarding that the current
-                #    stage is 'authorized'.  If this fails, roll back the claim.
-                transition_id = claimed.get("transition_id", "")
-                if transition_id:
-                    ok = transition_repo.update_stage(
-                        transition_id,
-                        "executing",
-                        expected_current_stage="authorized",
-                    )
-                    if not ok:
-                        savepoint.rollback()
-                        return None
-                else:
-                    # No transition to advance — cannot safely proceed.
-                    savepoint.rollback()
-                    return None
-
-                savepoint.commit()
-            except Exception:
+        savepoint = conn.begin_nested()
+        try:
+            claimed = auth_repo.claim_authorization(
+                authorization_id,
+                proxy_principal_id,
+                token_hash=presented_token_hash,
+            )
+            if claimed is None:
                 savepoint.rollback()
-                raise
+                return None
 
-            # 8. Build and return the result dict.
-            result: dict[str, Any] = {
-                "authorization_id": authorization_id,
-                "transition_id": claimed.get("transition_id", ""),
-                "execution_attempt_id": execution_attempt_id,
-                "payload_hash": claimed.get("payload_hash", payload_hash),
-                "policy_set_hash": claimed.get("policy_set_hash", ""),
-                "proxy_principal_id": proxy_principal_id,
-                "claimed": True,
-            }
-            return result
+            # Persist the execution_attempt_id on the authorization record.
+            auth_repo.update_execution_attempt_id(authorization_id, execution_attempt_id)
+
+            # Advance the transition to 'executing', guarding that the current
+            #    stage is 'authorized'.  If this fails, roll back the claim.
+            transition_id = claimed.get("transition_id", "")
+            if transition_id:
+                ok = transition_repo.update_stage(
+                    transition_id,
+                    "executing",
+                    expected_current_stage="authorized",
+                )
+                if not ok:
+                    savepoint.rollback()
+                    return None
+            else:
+                # No transition to advance — cannot safely proceed.
+                savepoint.rollback()
+                return None
+
+            savepoint.commit()
+        except Exception:
+            savepoint.rollback()
+            raise
+
+        # 8. Build and return the result dict.
+        result: dict[str, Any] = {
+            "authorization_id": authorization_id,
+            "transition_id": claimed.get("transition_id", ""),
+            "execution_attempt_id": execution_attempt_id,
+            "payload_hash": claimed.get("payload_hash", payload_hash),
+            "policy_set_hash": claimed.get("policy_set_hash", ""),
+            "proxy_principal_id": proxy_principal_id,
+            "claimed": True,
+        }
+        return result
 
     # ------------------------------------------------------------------ #
     # Staleness detection

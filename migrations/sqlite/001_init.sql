@@ -119,8 +119,10 @@ CREATE TABLE ep_credentials (
 CREATE TABLE ep_policies (
     id                 TEXT PRIMARY KEY,
     created_by         TEXT NOT NULL REFERENCES ep_principals(id),
-    scope              TEXT NOT NULL CHECK (scope IN ('global', 'agent')),
+    scope              TEXT NOT NULL CHECK (scope IN ('global', 'project', 'branch', 'agent')),
     agent_scope        TEXT REFERENCES ep_principals(id),
+    project_id         TEXT REFERENCES ep_projects(id),
+    branch_id          TEXT REFERENCES ep_branches(id),
     effect             TEXT NOT NULL CHECK (effect IN ('deny', 'require_approval', 'warn', 'allow')),
     actions            TEXT NOT NULL DEFAULT '[]',   -- JSON string
     resources          TEXT NOT NULL DEFAULT '[]',   -- JSON string
@@ -143,12 +145,20 @@ CREATE TABLE ep_policies (
     origin             TEXT NOT NULL DEFAULT 'local',
     trust_status       TEXT NOT NULL DEFAULT 'trusted',
     created_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    updated_at         TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    -- Scope consistency: ensure scope fields are mutually exclusive
+    CHECK (
+        (scope = 'global'  AND project_id IS NULL AND branch_id IS NULL AND agent_scope IS NULL)
+        OR (scope = 'project' AND project_id IS NOT NULL AND branch_id IS NULL AND agent_scope IS NULL)
+        OR (scope = 'branch'  AND branch_id IS NOT NULL AND project_id IS NULL AND agent_scope IS NULL)
+        OR (scope = 'agent'   AND agent_scope IS NOT NULL AND project_id IS NULL AND branch_id IS NULL)
+    )
 );
 
 -- No GIN in SQLite — regular index on actions (limited utility for JSON text)
 CREATE INDEX idx_ep_policies_actions      ON ep_policies (actions);
 CREATE INDEX idx_ep_policies_status_scope ON ep_policies (status, scope, agent_scope);
+CREATE INDEX idx_ep_policies_project      ON ep_policies (project_id, branch_id);
 
 -- ============================================================================
 -- Transitions
@@ -229,7 +239,7 @@ CREATE TABLE ep_authorizations (
 CREATE TABLE ep_approval_requests (
     id            TEXT PRIMARY KEY,
     transition_id TEXT NOT NULL REFERENCES ep_transitions(id),
-    policy_id     TEXT NOT NULL REFERENCES ep_policies(id),
+    policy_id     TEXT REFERENCES ep_policies(id),
     requested_by  TEXT NOT NULL REFERENCES ep_principals(id),
     justification TEXT,
     status        TEXT NOT NULL DEFAULT 'pending'
@@ -240,6 +250,12 @@ CREATE TABLE ep_approval_requests (
     decision      TEXT,
     reason        TEXT,
     updated_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE ep_approval_request_policies (
+    approval_request_id TEXT NOT NULL REFERENCES ep_approval_requests(id) ON DELETE CASCADE,
+    policy_id           TEXT NOT NULL REFERENCES ep_policies(id),
+    PRIMARY KEY (approval_request_id, policy_id)
 );
 
 CREATE TABLE ep_approval_decisions (
@@ -387,4 +403,15 @@ CREATE TABLE ep_policy_versions (
     branch_id    TEXT NOT NULL REFERENCES ep_branches(id),
     policy_count INTEGER NOT NULL DEFAULT 0,
     created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- ============================================================================
+-- Bootstrap state (one-time administrator enrollment)
+-- ============================================================================
+
+CREATE TABLE ep_bootstrap_state (
+    singleton_id    INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+    completed       BOOLEAN NOT NULL DEFAULT FALSE,
+    completed_by    TEXT NOT NULL REFERENCES ep_principals(id),
+    completed_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

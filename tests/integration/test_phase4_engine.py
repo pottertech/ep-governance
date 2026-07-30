@@ -41,6 +41,37 @@ from ep_governance.branches import BranchCommitter
 from ep_governance.errors import IllegalTransitionError, StaleHeadError
 
 
+def _build_allow_policy_engine():
+    """Build a PolicyEngine with a single allow-all policy for test fixtures."""
+    from ep_governance.policies import Policy
+    from ep_governance.policy_engine import PolicyEngine
+
+    _id = str(XID.new())
+    allow_policy = Policy(
+        id=_id,
+        effect="allow",
+        actions=["*"],
+        resources=["*"],
+        conditions={},
+        priority=1,
+        scope="global",
+        agent_scope=None,
+        project_id=None,
+        branch_id=None,
+        description="Test allow-all",
+        status="active",
+        created_by=_id,
+        approved_by=_id,
+        approved_at="2026-07-28T12:00:00.000000Z",
+        activation_version=1,
+        exception_to=[],
+        valid_from=None,
+        valid_until=None,
+        justification=None,
+    )
+    return PolicyEngine([allow_policy])
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -187,7 +218,7 @@ class TestStateMachine:
         assert is_legal_transition("proposed", "succeeded") is False
 
     def test_illegal_transition_raises(self, conn, engine, ep_service_id, setup):
-        engine = TransitionEngine(engine, ep_service_id)
+        engine = TransitionEngine(engine, ep_service_id, policy_engine=_build_allow_policy_engine())
         # Try to advance a non-existent transition
         with pytest.raises(Exception):
             engine.advance_stage("nonexistent", "succeeded")
@@ -200,7 +231,7 @@ class TestStateMachine:
 
 class TestProposalLifecycle:
     def test_propose_creates_transition(self, conn, engine, ep_service_id, setup):
-        engine = TransitionEngine(engine, ep_service_id)
+        engine = TransitionEngine(engine, ep_service_id, policy_engine=_build_allow_policy_engine())
         result = engine.propose(
             agent_id=setup["agent_id"],
             branch_id=setup["branch"]["id"],
@@ -213,7 +244,7 @@ class TestProposalLifecycle:
         assert result["stage"] in ("proposed", "authorized", "pending_approval", "denied")
 
     def test_idempotency_returns_existing(self, conn, engine, ep_service_id, setup):
-        engine = TransitionEngine(engine, ep_service_id)
+        engine = TransitionEngine(engine, ep_service_id, policy_engine=_build_allow_policy_engine())
         key = str(XID.new())
         result1 = engine.propose(
             agent_id=setup["agent_id"],
@@ -244,6 +275,7 @@ class TestSelfApprovalRejection:
         self, conn, engine, ep_service_id, agent_id, human_id, setup
     ):
         """EP-POLICY-012: the requester must not approve their own action."""
+        # No policy_engine: fail-closed gives pending_approval for any action
         engine = TransitionEngine(engine, ep_service_id)
 
         # Propose an action that goes to pending_approval
@@ -274,6 +306,7 @@ class TestSelfApprovalRejection:
     def test_human_can_approve_other_agent_action(
         self, conn, engine, ep_service_id, agent_id, human_id, setup
     ):
+        # No policy_engine: fail-closed gives pending_approval for any action
         engine = TransitionEngine(engine, ep_service_id)
         transition = engine.propose(
             agent_id=agent_id,
@@ -309,7 +342,7 @@ class TestAuthorizationTokens:
         auth_engine = AuthorizationEngine(engine, km, ep_service_id)
 
         # Create a transition first
-        trans_engine = TransitionEngine(engine, ep_service_id)
+        trans_engine = TransitionEngine(engine, ep_service_id, policy_engine=_build_allow_policy_engine())
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -340,7 +373,7 @@ class TestAuthorizationTokens:
         km = KeyManager()
         auth_engine = AuthorizationEngine(engine, km, ep_service_id)
 
-        trans_engine = TransitionEngine(engine, ep_service_id)
+        trans_engine = TransitionEngine(engine, ep_service_id, policy_engine=_build_allow_policy_engine())
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -393,7 +426,7 @@ class TestAuthorizationTokens:
         km = KeyManager()
         auth_engine = AuthorizationEngine(engine, km, ep_service_id)
 
-        trans_engine = TransitionEngine(engine, ep_service_id)
+        trans_engine = TransitionEngine(engine, ep_service_id, policy_engine=_build_allow_policy_engine())
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -533,7 +566,7 @@ class TestExecutionResults:
     def test_record_success_advances_to_succeeded(
         self, conn, engine, ep_service_id, agent_id, setup
     ):
-        engine = TransitionEngine(engine, ep_service_id)
+        engine = TransitionEngine(engine, ep_service_id, policy_engine=_build_allow_policy_engine())
         transition = engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -557,7 +590,7 @@ class TestExecutionResults:
             assert result["stage"] == "succeeded"
 
     def test_record_failure_advances_to_failed(self, conn, engine, ep_service_id, agent_id, setup):
-        engine = TransitionEngine(engine, ep_service_id)
+        engine = TransitionEngine(engine, ep_service_id, policy_engine=_build_allow_policy_engine())
         transition = engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -582,7 +615,7 @@ class TestExecutionResults:
     def test_timeout_becomes_execution_uncertain(
         self, conn, engine, ep_service_id, agent_id, setup
     ):
-        engine = TransitionEngine(engine, ep_service_id)
+        engine = TransitionEngine(engine, ep_service_id, policy_engine=_build_allow_policy_engine())
         transition = engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -609,7 +642,7 @@ class TestExecutionResults:
     ):
         from ep_governance.branches import BranchCommitter
 
-        trans_engine = TransitionEngine(engine, ep_service_id)
+        trans_engine = TransitionEngine(engine, ep_service_id, policy_engine=_build_allow_policy_engine())
         committer = BranchCommitter(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,

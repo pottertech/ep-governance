@@ -126,6 +126,8 @@ class TestMigrations:
             "ep_sessions",
             "ep_transfer_packages",
             "ep_import_mappings",
+            "ep_bootstrap_state",
+            "ep_approval_request_policies",
         }
         missing = required - tables
         assert not missing, f"Missing tables: {missing}"

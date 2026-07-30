@@ -34,6 +34,76 @@ from ep_governance.authorizations import KeyManager, AuthorizationEngine
 from ep_governance.transitions import TransitionEngine
 from ep_governance.branches import BranchCommitter
 from ep_governance.errors import StaleHeadError, IllegalTransitionError, SeparationOfDutiesError
+
+
+def _build_default_policy_engine(conn):
+    """Build a PolicyEngine with a global allow-all policy for test fixtures."""
+    from ep_governance.policies import Policy
+    from ep_governance.policy_engine import PolicyEngine
+
+    _id = str(XID.new())
+    allow_policy = Policy(
+        id=_id,
+        effect="allow",
+        actions=["*"],
+        resources=["*"],
+        conditions={},
+        priority=1,
+        scope="global",
+        agent_scope=None,
+        project_id=None,
+        branch_id=None,
+        description="Test allow-all",
+        status="active",
+        created_by=_id,
+        approved_by=_id,
+        approved_at="2026-07-28T12:00:00.000000Z",
+        activation_version=1,
+        exception_to=[],
+        valid_from=None,
+        valid_until=None,
+        justification=None,
+    )
+    return PolicyEngine([allow_policy])
+
+
+def _build_all_policies_engine(conn):
+    """Build a PolicyEngine from ALL active policies in the DB (for deny tests)."""
+    from ep_governance.policies import Policy
+    from ep_governance.policy_engine import PolicyEngine
+    from ep_governance.db.repositories import PolicyRepository
+
+    repo = PolicyRepository(conn)
+    rows = repo.list_active_policies()
+    allowed_fields = {
+        "id", "effect", "actions", "resources", "conditions", "priority",
+        "scope", "agent_scope", "project_id", "branch_id", "description",
+        "status", "created_by", "approved_by", "approved_at",
+        "activation_version", "exception_to", "valid_from", "valid_until",
+        "justification",
+    }
+    policies = []
+    for r in rows:
+        filtered = {k: v for k, v in r.items() if k in allowed_fields}
+        # Skip the 'default' policy with non-XID id
+        if filtered.get("id") == "default":
+            continue
+        try:
+            policies.append(Policy.model_validate(filtered))
+        except Exception:
+            continue
+    # Always add a fresh allow-all as fallback
+    _id = str(XID.new())
+    policies.append(Policy(
+        id=_id, effect="allow", actions=["*"], resources=["*"],
+        conditions={}, priority=0, scope="global", agent_scope=None,
+        project_id=None, branch_id=None, description="Fallback allow",
+        status="active", created_by=_id, approved_by=_id,
+        approved_at="2026-07-28T12:00:00.000000Z", activation_version=1,
+        exception_to=[], valid_from=None, valid_until=None, justification=None,
+    ))
+    return PolicyEngine(policies)
+
 from ep_governance.canonical import canonical_hash
 
 
@@ -277,7 +347,8 @@ class TestTokenReplay:
         auth_engine = AuthorizationEngine(engine, km, ep_service_id)
 
         # Create a transition and authorize
-        trans_engine = TransitionEngine(engine, ep_service_id)
+        policy_engine = _build_default_policy_engine(conn)
+        trans_engine = TransitionEngine(engine, ep_service_id, policy_engine=policy_engine)
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -379,7 +450,8 @@ class TestDeniedCreatesNoNode:
         )
         conn.commit()
 
-        trans_engine = TransitionEngine(engine, ep_service_id)
+        policy_engine = _build_all_policies_engine(conn)
+        trans_engine = TransitionEngine(engine, ep_service_id, policy_engine=policy_engine)
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -412,7 +484,8 @@ class TestExecutionUncertain:
         self, conn, engine, setup, ep_service_id, agent_id
     ):
         """Timeout must produce execution_uncertain, not failed."""
-        trans_engine = TransitionEngine(engine, ep_service_id)
+        policy_engine = _build_default_policy_engine(conn)
+        trans_engine = TransitionEngine(engine, ep_service_id, policy_engine=policy_engine)
         transition = trans_engine.propose(
             agent_id=agent_id,
             branch_id=setup["branch"]["id"],
@@ -437,7 +510,8 @@ class TestExecutionUncertain:
         from ep_governance.branches import BranchCommitter
         from ep_governance.db.repositories import BranchRepository
 
-        trans_engine = TransitionEngine(engine, ep_service_id)
+        policy_engine = _build_default_policy_engine(conn)
+        trans_engine = TransitionEngine(engine, ep_service_id, policy_engine=policy_engine)
         committer = BranchCommitter(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,
@@ -557,6 +631,7 @@ class TestSelfApprovalAdversarial:
         self, conn, engine, setup, ep_service_id, agent_id, human_id
     ):
         """An agent must not approve its own action."""
+        # No policy_engine: fail-closed gives pending_approval for any action
         trans_engine = TransitionEngine(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,
@@ -581,6 +656,7 @@ class TestSelfApprovalAdversarial:
         self, conn, engine, setup, ep_service_id, agent_id, human_id
     ):
         """A human can approve another agent's action."""
+        # No policy_engine: fail-closed gives pending_approval for any action
         trans_engine = TransitionEngine(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,

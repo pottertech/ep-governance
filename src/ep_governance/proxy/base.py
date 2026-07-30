@@ -30,7 +30,7 @@ from sqlalchemy.exc import OperationalError
 
 from ..authorizations import AuthorizationEngine, AuthorizationToken
 from ..branches import BranchCommitter
-from ..canonical import canonical_hash
+from ..canonical import canonical_hash, compute_policy_set_hash
 from ..classification import get_classifier
 from ..db.repositories import BranchRepository
 from ..db.transactions import serializable_transaction
@@ -262,11 +262,7 @@ class GovernedProxy(ABC):
                         )
                         fresh_policy_versions[p.id] = int(version)
 
-                    if fresh_policy_versions:
-                        sorted_pairs = sorted(fresh_policy_versions.items())
-                        fresh_policy_set_hash = canonical_hash(sorted_pairs)
-                    else:
-                        fresh_policy_set_hash = ""
+                    fresh_policy_set_hash = compute_policy_set_hash(fresh_policy_versions)
 
                     # 5e. Compare the fresh hash to the token's policy_set_hash.
                     if fresh_policy_set_hash != token.policy_set_hash:
@@ -298,10 +294,13 @@ class GovernedProxy(ABC):
                 # The claim must also verify the signed-token hash matches the
                 # stored hash (High fix 6).
                 #
-                # auth_engine uses its own engine/connection internally.
-                # The claim happens within the serializable transaction
-                # context established above.
-                claimed = self.auth_engine.verify_and_claim(
+                # We call verify_and_claim_in_transaction() with the SAME
+                # connection from this serializable_transaction so the policy
+                # revalidation (Step 5 above) and the token claim share a single
+                # transaction — eliminating the TOCTOU race where a policy could
+                # change between evaluation and claim.
+                claimed = self.auth_engine.verify_and_claim_in_transaction(
+                    conn,
                     authorization_id=token.authorization_id,
                     signed_token=signed_token,
                     payload_hash=actual_payload_hash,

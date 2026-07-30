@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Any
 import sqlalchemy as sa
 
 from .audit import AuditWriter
-from .canonical import canonical_hash
+from .canonical import canonical_hash, compute_policy_set_hash
 from .classification import (
     ClassificationConfidence,
     ClassificationResult,
@@ -275,9 +275,25 @@ class TransitionEngine:
             triggering_policy_id: str | None = None
 
             if self.policy_engine is not None:
+                project_row = conn.execute(
+                    sa.text(
+                        "SELECT l.project_id FROM ep_branches b "
+                        "JOIN ep_lattices l ON b.lattice_id = l.id "
+                        "WHERE b.id = :branch_id"
+                    ),
+                    {"branch_id": branch_id},
+                ).fetchone()
+                if project_row is None:
+                    raise IllegalTransitionError(f"Branch '{branch_id}' does not resolve to a project")
+                project_id = project_row[0]
                 resolution: PolicyResolution = self.policy_engine.evaluate(
                     action_type=classification.action_type,
                     canonical_resources=classification.canonical_resources,
+                    context={
+                        "agent_id": agent_id,
+                        "project_id": project_id,
+                        "branch_id": branch_id,
+                    },
                 )
                 if resolution.effect == "deny":
                     verification_result = "denied"
@@ -291,12 +307,13 @@ class TransitionEngine:
 
                 # Record matched policy info
                 matched_policy_versions = {
-                    m.policy.id: m.policy.priority for m in resolution.matched_policies
+                    m.policy.id: m.policy.activation_version if m.policy.activation_version is not None else 0
+                    for m in resolution.matched_policies
                 }
                 # Compute policy-set hash using the standardized format
                 # (sorted policy_id:version pairs, canonical hash)
                 if resolution.matched_policies:
-                    policy_set_hash = canonical_hash(sorted(matched_policy_versions.items()))
+                    policy_set_hash = compute_policy_set_hash(matched_policy_versions)
                     # Find the first require_approval policy for the approval request FK
                     triggering_policy_id = None
                     for m in resolution.matched_policies:
@@ -304,11 +321,8 @@ class TransitionEngine:
                             triggering_policy_id = m.policy.id
                             break
             else:
-                # No policy engine → use classification's requires_approval flag
-                if classification.requires_approval:
-                    verification_result = "pending_approval"
-                else:
-                    verification_result = "admissible"
+                # Missing policy state is never permission. Fail closed.
+                verification_result = "pending_approval"
 
             # ----------------------------------------------------------------
             # 5. Insert transition with stage='proposed'
@@ -359,13 +373,33 @@ class TransitionEngine:
             elif verification_result == "pending_approval":
                 # Advance to pending_approval and create approval request
                 transition = self.advance_stage(transition_id, "pending_approval", conn=conn)
-                # Create an approval request — use the actual triggering policy XID
-                # not the policy_set_hash (which is not a valid ep_policies FK)
-                approval_repo.create_request(
+                # Create an approval request.  The singular policy_id is
+                # optional now — the authoritative record is in the
+                # ep_approval_request_policies association table.  When no
+                # specific policy triggered the approval (e.g. classification
+                # required it, or no policy engine was configured), policy_id
+                # is NULL and the justification records the trigger reason.
+                approval_request = approval_repo.create_request(
                     transition_id=transition_id,
-                    policy_id=triggering_policy_id or "default",
                     requested_by=agent_id,
                     justification=f"Action '{classification.action_type}' requires approval",
+                    policy_id=triggering_policy_id,
+                )
+                # Record ALL triggering require_approval policies in the
+                # association table (the single FK on ep_approval_requests is
+                # kept for backward compatibility).  ``resolution`` is only
+                # bound when the policy engine is available; without it there
+                # are no matched policies to record.
+                _approval_policy_ids: list[str] = []
+                if self.policy_engine is not None:
+                    _approval_policy_ids = [
+                        m.policy.id
+                        for m in resolution.matched_policies
+                        if m.policy.effect == "require_approval"
+                    ]
+                approval_repo.add_policies(
+                    approval_request["id"],
+                    _approval_policy_ids,
                 )
                 self._write_audit_event(
                     transition_id=transition_id,

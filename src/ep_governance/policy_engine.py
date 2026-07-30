@@ -17,6 +17,7 @@ import fnmatch
 from dataclasses import dataclass, field
 from typing import Any
 
+from .errors import MissingPolicyContextError
 from .policies import Policy, PolicyEffect, PolicyScope
 from .resources import match_glob
 
@@ -220,7 +221,17 @@ class PolicyEngine:
         canonical_resources: list[str],
         context: dict[str, Any],
     ) -> list[PolicyMatch]:
-        """Find all active, in-force policies matching the action and resources."""
+        """Find all active, in-force policies matching the action and resources.
+
+        Scope enforcement (defense in depth): even if the caller supplies
+        an already-filtered policy collection, the engine verifies that
+        each policy's scope is applicable to the evaluation context:
+
+        - global:  always applicable
+        - project: only if context['project_id'] matches policy.project_id
+        - branch:  only if context['branch_id'] matches policy.branch_id
+        - agent:   only if context['agent_id'] matches policy.agent_scope
+        """
         matches: list[PolicyMatch] = []
 
         for policy in self._policies:
@@ -233,6 +244,29 @@ class PolicyEngine:
             if not policy.is_in_force():
                 continue
 
+            # Scope enforcement (fail closed). Scoped policies MUST NOT be
+            # evaluated without their authoritative context.
+            scope_val = self._scope_str(policy.scope)
+            if scope_val == "project":
+                ctx_project = context.get("project_id")
+                if ctx_project is None:
+                    raise MissingPolicyContextError("project_id is required for project-scoped policy evaluation")
+                if policy.project_id != ctx_project:
+                    continue
+            elif scope_val == "branch":
+                ctx_branch = context.get("branch_id")
+                if ctx_branch is None:
+                    raise MissingPolicyContextError("branch_id is required for branch-scoped policy evaluation")
+                if policy.branch_id != ctx_branch:
+                    continue
+            elif scope_val == "agent":
+                ctx_agent = context.get("agent_id")
+                if ctx_agent is None:
+                    raise MissingPolicyContextError("agent_id is required for agent-scoped policy evaluation")
+                if policy.agent_scope != ctx_agent:
+                    continue
+            # global: always applicable
+
             # Action matching (glob)
             matched_actions: list[str] = []
             for pattern in policy.actions:
@@ -242,12 +276,19 @@ class PolicyEngine:
                 continue
 
             # Resource matching (glob)
+            # When canonical_resources is empty (e.g. "SELECT 1" with no
+            # table targets), a wildcard "*" pattern should still match.
             matched_resources: list[str] = []
             for res_pattern in policy.resources:
-                for canonical in canonical_resources:
-                    if match_glob(res_pattern, canonical):
+                if not canonical_resources:
+                    if res_pattern == "*":
                         matched_resources.append(res_pattern)
                         break
+                else:
+                    for canonical in canonical_resources:
+                        if match_glob(res_pattern, canonical):
+                            matched_resources.append(res_pattern)
+                            break
             if not matched_resources:
                 continue
 
