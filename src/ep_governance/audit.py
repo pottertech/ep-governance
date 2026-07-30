@@ -412,6 +412,9 @@ def _load_json(s: str | bytes | None) -> dict[str, Any]:
     """Parse event_data from a stored JSON string back to a dict."""
     if s is None:
         return {}
+    if isinstance(s, dict):
+        # PostgreSQL with psycopg3 returns JSONB columns as dicts directly
+        return s
     if isinstance(s, (bytes, bytearray)):
         s = s.decode("utf-8")
     import json
