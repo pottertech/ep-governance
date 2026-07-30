@@ -1,7 +1,7 @@
 # EP-Governance Architecture Overview
 
-**Version:** 1.0 (Phase 1)
-**Date:** July 29, 2026
+**Version:** 1.1 (enforced mode verified July 30, 2026)
+**Date:** July 30, 2026
 **Governing Sources:** v1.1 §2, §3, §16, §18, §20.4. v1.1.1 §8.
 
 ---
@@ -126,6 +126,26 @@ EP_DEV=true           # enables self-registration and advisory mode (development
 ```
 
 If `EP_MODE=enforced` but deployment requirements are not met, the system operates in advisory mode and reports an advisory.
+
+### 3.4 Verified Deployment (July 30, 2026)
+
+Enforced mode has been verified end-to-end against NAS PostgreSQL (100.98.247.27:5433,
+ep_governance schema in gbrain_pilot_test). The full pipeline was tested:
+
+1. Propose SELECT 1 → policy engine matched allow policy → transition authorized
+2. Ed25519-signed authorization token issued (payload-bound, agent-bound, branch-bound, single-use, 5-min TTL)
+3. PostgresProxy verified token signature, computed payload hash from actual payload, verified match
+4. Proxy revalidated current policy state (stale authorization detection via policy_set_hash)
+5. Proxy atomically claimed authorization (UPDATE...WHERE used=FALSE...RETURNING)
+6. SQL executed against target database → returned 1 row
+7. Graph node created (first real node on branch), branch head advanced v1→v2
+8. Transition stage: succeeded. Authorization marked as used. Audit event appended.
+
+Additional verified security properties:
+- DROP TABLE denied by deny policy (priority 100) — no token issued, no execution
+- Token reuse rejected — second submission of same token fails with "already used"
+- Payload tampering detected — proxy computes hash from actual payload, mismatch causes rejection
+- 861 unit/property/contract tests pass, 0 failures
 
 ---
 

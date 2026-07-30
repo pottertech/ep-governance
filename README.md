@@ -4,7 +4,10 @@ A binding governance system for AI agents. It maintains a persistent directed ac
 
 ## Status
 
-Phase 0/1 — specification formalization and executable contracts. No runtime behaviour is implemented yet.
+Enforced mode verified (July 30, 2026). Full pipeline tested against NAS PostgreSQL:
+propose, policy evaluation, Ed25519 token issuance, governed proxy execution,
+graph node creation, branch head advancement. Token reuse and payload tampering
+rejected. 861 unit/property/contract tests pass, 4 end-to-end enforced mode tests pass.
 
 ## Governing Documents
 
