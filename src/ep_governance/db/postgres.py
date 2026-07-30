@@ -38,6 +38,16 @@ def create_engine(db_url: str, **kwargs: Any) -> sa.Engine:
                 cursor = dbapi_conn.cursor()
                 cursor.execute(f"SET search_path TO {schema}")
                 cursor.close()
+
+            # SQLAlchemy resets connections on return to the pool (rollback).
+            # The default rollback clears session-level settings like search_path.
+            # Re-apply search_path on every reset so pooled connections always
+            # see the correct schema.
+            @sa.event.listens_for(engine, "reset")
+            def _reset_search_path(dbapi_conn: Any, _record: Any, _reset_state: Any = None) -> None:
+                cursor = dbapi_conn.cursor()
+                cursor.execute(f"SET search_path TO {schema}")
+                cursor.close()
     elif db_url.startswith("sqlite://"):
         # Enable foreign keys and WAL mode for SQLite
         engine = sa.create_engine(
