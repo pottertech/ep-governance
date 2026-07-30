@@ -59,20 +59,20 @@ app.add_typer(audit_app, name="audit")
 def _get_conn() -> Connection:
     """Load config and return a database connection."""
     cfg = load_config()
-    engine = create_engine(cfg.db_url)
+    engine = create_engine(cfg.db_url, schema=cfg.db_schema or None)
     return engine.connect()
 
 
 def _get_engine():
     """Load config and return a SQLAlchemy Engine."""
     cfg = load_config()
-    return create_engine(cfg.db_url)
+    return create_engine(cfg.db_url, schema=cfg.db_schema or None)
 
 
 def _get_conn_with_migrations() -> Connection:
     """Load config, run migrations, return connection."""
     cfg = load_config()
-    engine = create_engine(cfg.db_url)
+    engine = create_engine(cfg.db_url, schema=cfg.db_schema or None)
     conn = engine.connect()
     dialect = "sqlite" if is_sqlite(conn) else "postgres"
     run_migrations(conn, dialect)
@@ -428,10 +428,22 @@ def _build_policy_engine_cli(conn, branch_id: str | None = None, agent_id: str |
         )
 
     policy_rows = repo.list_effective_policies(project_id, branch_id, agent_id)
+    allowed_fields = {
+        "id", "effect", "actions", "resources", "conditions", "priority",
+        "scope", "agent_scope", "project_id", "branch_id", "description",
+        "status", "created_by", "approved_by", "approved_at",
+        "activation_version", "exception_to", "valid_from", "valid_until",
+        "justification",
+    }
+    import datetime as _dt
     policies = []
     for row in policy_rows:
+        filtered = {k: v for k, v in row.items() if k in allowed_fields}
+        for k, v in filtered.items():
+            if isinstance(v, _dt.datetime):
+                filtered[k] = v.isoformat()
         try:
-            policies.append(Policy.model_validate(row))
+            policies.append(Policy.model_validate(filtered))
         except Exception as exc:
             raise PolicyIntegrityError(
                 f"Active policy {row.get('id', '<unknown>')} is invalid"

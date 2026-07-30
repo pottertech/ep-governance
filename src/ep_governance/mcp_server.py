@@ -677,10 +677,22 @@ def _build_policy_engine(
         )
 
     policy_rows = repo.list_effective_policies(project_id, branch_id, agent_id)
+    allowed_fields = {
+        "id", "effect", "actions", "resources", "conditions", "priority",
+        "scope", "agent_scope", "project_id", "branch_id", "description",
+        "status", "created_by", "approved_by", "approved_at",
+        "activation_version", "exception_to", "valid_from", "valid_until",
+        "justification",
+    }
+    import datetime as _dt
     policies: list[Policy] = []
     for row in policy_rows:
+        filtered = {k: v for k, v in row.items() if k in allowed_fields}
+        for k, v in filtered.items():
+            if isinstance(v, _dt.datetime):
+                filtered[k] = v.isoformat()
         try:
-            policies.append(Policy.model_validate(row))
+            policies.append(Policy.model_validate(filtered))
         except Exception as exc:
             raise PolicyIntegrityError(
                 f"Active policy {row.get('id', '<unknown>')} is invalid"

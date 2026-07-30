@@ -24,11 +24,20 @@ def create_engine(db_url: str, **kwargs: Any) -> sa.Engine:
     For PostgreSQL: uses psycopg (psycopg3) as the driver.
     For SQLite: uses the built-in sqlite3 driver with WAL mode.
     """
+    schema = kwargs.pop("schema", None)
+
     if db_url.startswith("postgresql://") or db_url.startswith("postgresql+psycopg://"):
-        # Ensure we use psycopg (v3) if available
+        # Ensure we use psycopg (psycopg3) if available
         if not db_url.startswith("postgresql+psycopg://"):
             db_url = db_url.replace("postgresql://", "postgresql+psycopg://", 1)
         engine = sa.create_engine(db_url, future=True, **kwargs)
+
+        if schema:
+            @sa.event.listens_for(engine, "connect")
+            def _set_search_path(dbapi_conn: Any, _record: Any) -> None:
+                cursor = dbapi_conn.cursor()
+                cursor.execute(f"SET search_path TO {schema}")
+                cursor.close()
     elif db_url.startswith("sqlite://"):
         # Enable foreign keys and WAL mode for SQLite
         engine = sa.create_engine(

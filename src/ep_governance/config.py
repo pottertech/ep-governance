@@ -48,6 +48,7 @@ class Config:
 
     mode: str = OperatingMode.ENFORCED
     db_url: str = ""
+    db_schema: str = ""
     embedding_provider: str = EmbeddingProvider.NONE
     embedding_model: str = ""
     embedding_host: str = ""
@@ -108,6 +109,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
     return Config(
         mode=mode,
         db_url=db_url,
+        db_schema=e.get("EP_DB_SCHEMA", ""),
         embedding_provider=embedding_provider,
         embedding_model=e.get("EP_EMBEDDING_MODEL", ""),
         embedding_host=e.get("EP_EMBEDDING_HOST", ""),
