@@ -145,7 +145,7 @@ Additional verified security properties:
 - DROP TABLE denied by deny policy (priority 100) — no token issued, no execution
 - Token reuse rejected — second submission of same token fails with "already used"
 - Payload tampering detected — proxy computes hash from actual payload, mismatch causes rejection
-- 861 unit/property/contract tests pass, 0 failures
+- 918 unit/property/contract/integration/concurrency/adversarial/migration/fault tests pass, 0 failures
 
 ---
 

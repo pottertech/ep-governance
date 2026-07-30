@@ -99,7 +99,7 @@ End-to-end enforced mode test against NAS PostgreSQL:
 - TEST 3 PASS: Token reuse -> rejected (authorization already claimed)
 - TEST 4 PASS: Payload tampering -> hash mismatch detected, execution refused
 
-Unit/property/contract tests: 734 passed, 0 failed
+Unit/property/contract/concurrency/adversarial/migration/fault tests: 918 passed, 0 failed
 
 ## MCP tools
 
