@@ -212,7 +212,14 @@ def test_sorted_keys_recursive(value):
 @given(json_values)
 @settings(max_examples=200)
 def test_no_whitespace(value):
-    """canonical_json output has no spaces after separators."""
+    """canonical_json output has no insignificant whitespace after separators."""
+    import json as _json
+
     result = canonical_json(value)
-    assert ", " not in result
-    assert ": " not in result
+    # The canonical form must match json.dumps with tight separators.
+    # Checking for substrings like ": " is incorrect because keys or string
+    # values can legitimately contain those characters.
+    expected = _json.dumps(
+        _json.loads(result), sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    assert result == expected
