@@ -43,6 +43,7 @@ GRANT ALL ON
     ep_transitions,
     ep_authorizations,
     ep_approval_requests,
+    ep_approval_request_policies,
     ep_approval_decisions,
     ep_risk_ledger,
     ep_risk_mitigations,
@@ -50,7 +51,8 @@ GRANT ALL ON
     ep_sessions,
     ep_transfer_packages,
     ep_import_mappings,
-    ep_policy_versions
+    ep_policy_versions,
+    ep_bootstrap_state
 TO ep_service;
 
 -- Grant sequence usage (for any SERIAL/BIGSERIAL columns if added later)
@@ -97,3 +99,5 @@ REVOKE ALL ON ep_principals         FROM ep_agent;
 REVOKE ALL ON ep_roles              FROM ep_agent;
 REVOKE ALL ON ep_role_bindings      FROM ep_agent;
 REVOKE ALL ON ep_credentials        FROM ep_agent;
+REVOKE ALL ON ep_approval_request_policies FROM ep_agent;
+REVOKE ALL ON ep_bootstrap_state    FROM ep_agent;

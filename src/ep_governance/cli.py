@@ -802,9 +802,9 @@ def bootstrap_admin(
         raise typer.Exit(1)
 
     try:
-        conn = _get_conn_with_migrations()
+        conn = _get_conn()
 
-        # Commit any pending autobegun transaction (from migrations) so the
+        # Commit any pending autobegun transaction so the
         # serializable_transaction context manager receives a clean connection.
         if conn.in_transaction():
             conn.commit()
@@ -969,7 +969,27 @@ def serve(
     port: int = typer.Option(8200, "--port", help="HTTP port."),
 ) -> None:
     """Start the MCP server."""
-    typer.echo("MCP server not yet implemented (Phase 7).")
+    import asyncio
+    from .mcp_server import run_server
+    cfg = load_config()
+    # In advisory/dev mode, use the EP service principal for MCP operations
+    # In production, this must come from authenticated transport credentials
+    import sqlalchemy as _sa
+    engine = _sa.create_engine(cfg.db_url) if not cfg.db_schema else None
+    if engine is None:
+        from .db.postgres import create_engine as _ce
+        engine = _ce(cfg.db_url, schema=cfg.db_schema or None)
+    with engine.connect() as _conn:
+        result = _conn.execute(_sa.text("SELECT id FROM ep_principals WHERE type='service' AND name='EP Service' LIMIT 1"))
+        row = result.fetchone()
+        principal_id = row[0] if row else None
+    if not principal_id:
+        typer.echo("ERROR: EP Service principal not found. Run 'ep-governance init' first.")
+        raise typer.Exit(1)
+    asyncio.run(run_server(
+        mode=cfg.mode,
+        authenticated_principal_id=principal_id,
+    ))
 
 
 def main() -> None:
