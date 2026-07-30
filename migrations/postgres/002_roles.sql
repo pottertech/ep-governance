@@ -1,7 +1,10 @@
 -- EP-Governance database roles and permissions
--- Version: v1.1.1
+-- Version: v1.1.2
 -- Enforces the immutability of ep_events via database roles (no triggers).
 -- Only ep_service can INSERT into ep_events; no role can UPDATE or DELETE.
+
+-- Ensure all objects are created/granted in the ep_governance schema.
+SET search_path TO ep_governance;
 
 -- ============================================================================
 -- ep_service role: full application access with audit-log protections
