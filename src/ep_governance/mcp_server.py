@@ -563,7 +563,6 @@ def _get_ep_service_id(conn: Any) -> str:
         machine=None,
         description="EP service",
     )
-    conn.commit()
     return p["id"]
 
 
@@ -659,7 +658,6 @@ def _ep_check(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any]:
         arguments=args["arguments"],
         idempotency_key=str(XID.new()),
     )
-    conn.commit()
     return {"transition_id": transition["id"], "stage": transition["stage"]}
 
 
@@ -673,7 +671,6 @@ def _ep_execute(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any
         arguments=args["arguments"],
         idempotency_key=str(XID.new()),
     )
-    conn.commit()
     return {"transition_id": transition["id"], "stage": transition["stage"]}
 
 
@@ -785,7 +782,6 @@ def _ep_approve(
         return {"error": "Approval request not found"}
     # Commit any pending reads so TransitionEngine.approve receives a clean
     # connection (it opens its own transaction — Issue Critical 2 / High 6).
-    conn.commit()
     trans_engine = TransitionEngine(conn.engine, ep_id)
     # Separation-of-duties (approver != requester) is enforced by
     # TransitionEngine.approve; the approver_id here is the authenticated
@@ -796,7 +792,6 @@ def _ep_approve(
         approver_type="human",
         reason=args.get("reason", "Approved"),
     )
-    conn.commit()
     return {"transition_id": req["transition_id"], "stage": result["stage"]}
 
 
@@ -821,14 +816,12 @@ def _ep_deny(
         return {"error": "Approval request not found"}
     # Commit any pending reads so TransitionEngine.deny_approval receives a
     # clean connection (it opens its own transaction — Issue Critical 2 / High 6).
-    conn.commit()
     trans_engine = TransitionEngine(conn.engine, ep_id)
     result = trans_engine.deny_approval(
         transition_id=req["transition_id"],
         approver_id=approver_id,
         reason=args.get("reason", "Denied"),
     )
-    conn.commit()
     return {"transition_id": req["transition_id"], "stage": result["stage"]}
 
 

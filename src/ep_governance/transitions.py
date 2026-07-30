@@ -14,7 +14,6 @@ recorded as an immutable audit event.
 from __future__ import annotations
 
 import datetime
-import hashlib
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -29,11 +28,7 @@ from .classification import (
 )
 from .db.repositories import (
     ApprovalRepository,
-    AuthorizationRepository,
     BranchRepository,
-    NodeRepository,
-    PolicyRepository,
-    PrincipalRepository,
     TransitionRepository,
 )
 from .db.transactions import transaction
@@ -277,6 +272,7 @@ class TransitionEngine:
             verification_result: str = "pending_approval"  # fail-closed default
             matched_policy_versions: dict[str, Any] = {}
             policy_set_hash: str | None = None
+            triggering_policy_id: str | None = None
 
             if self.policy_engine is not None:
                 resolution: PolicyResolution = self.policy_engine.evaluate(
@@ -297,12 +293,16 @@ class TransitionEngine:
                 matched_policy_versions = {
                     m.policy.id: m.policy.priority for m in resolution.matched_policies
                 }
-                # Compute a simple policy-set hash from matched policy ids
+                # Compute policy-set hash using the standardized format
+                # (sorted policy_id:version pairs, canonical hash)
                 if resolution.matched_policies:
-                    policy_ids = sorted(m.policy.id for m in resolution.matched_policies)
-                    policy_set_hash = hashlib.sha256(
-                        json.dumps(policy_ids).encode("utf-8")
-                    ).hexdigest()
+                    policy_set_hash = canonical_hash(sorted(matched_policy_versions.items()))
+                    # Find the first require_approval policy for the approval request FK
+                    triggering_policy_id = None
+                    for m in resolution.matched_policies:
+                        if m.policy.effect == "require_approval":
+                            triggering_policy_id = m.policy.id
+                            break
             else:
                 # No policy engine → use classification's requires_approval flag
                 if classification.requires_approval:
@@ -359,10 +359,11 @@ class TransitionEngine:
             elif verification_result == "pending_approval":
                 # Advance to pending_approval and create approval request
                 transition = self.advance_stage(transition_id, "pending_approval", conn=conn)
-                # Create an approval request
+                # Create an approval request — use the actual triggering policy XID
+                # not the policy_set_hash (which is not a valid ep_policies FK)
                 approval_repo.create_request(
                     transition_id=transition_id,
-                    policy_id=policy_set_hash or "default",
+                    policy_id=triggering_policy_id or "default",
                     requested_by=agent_id,
                     justification=f"Action '{classification.action_type}' requires approval",
                 )
@@ -531,71 +532,70 @@ class TransitionEngine:
             ApprovalAlreadyDecidedError: If the approval request was already
                                           decided by another approver (race).
         """
-        with self.engine.connect() as conn:
-            with transaction(conn):
-                transition_repo = TransitionRepository(conn)
-                approval_repo = ApprovalRepository(conn)
+        with self.engine.connect() as conn, transaction(conn):
+            transition_repo = TransitionRepository(conn)
+            approval_repo = ApprovalRepository(conn)
 
-                transition = transition_repo.get_transition(transition_id)
-                if transition is None:
-                    raise IllegalTransitionError(f"Transition '{transition_id}' not found")
+            transition = transition_repo.get_transition(transition_id)
+            if transition is None:
+                raise IllegalTransitionError(f"Transition '{transition_id}' not found")
 
-                current_stage = transition.get("stage", "")
-                if current_stage != "pending_approval":
-                    raise IllegalTransitionError(
-                        f"Cannot deny transition in stage '{current_stage}'; must be 'pending_approval'"
-                    )
-
-                # Separation of duties
-                agent_id: str = transition.get("agent_id", "")
-                if approver_id == agent_id:
-                    raise SeparationOfDutiesError("The requester cannot deny their own action")
-
-                branch_id: str = transition.get("branch_id", "")
-
-                # Decide the EXISTING pending approval request for this transition.
-                # The request was created during propose(); we must NOT create a new
-                # one — that would leave the original pending forever while a new
-                # request gets decided (Issue Critical 2).
-                approval = approval_repo.find_pending_by_transition(transition_id)
-                if approval is None:
-                    raise IllegalTransitionError(
-                        f"No pending approval request found for transition '{transition_id}'"
-                    )
-                # decide() returns None when its `WHERE status = 'pending'` guard
-                # fails — i.e. a concurrent approver already decided this request
-                # (Issue Critical 3).  Detect the race and abort atomically; the
-                # surrounding transaction rolls back any partial work.
-                decided = approval_repo.decide(
-                    request_id=approval["id"],
-                    decided_by=approver_id,
-                    decision="denied",
-                    reason=reason,
-                )
-                if decided is None:
-                    raise ApprovalAlreadyDecidedError(
-                        f"Approval request '{approval['id']}' for transition "
-                        f"'{transition_id}' was already decided by another approver"
-                    )
-
-                # Advance transition to denied
-                transition = self.advance_stage(transition_id, "denied", conn=conn)
-
-                self._write_audit_event(
-                    transition_id=transition_id,
-                    branch_id=branch_id,
-                    event_type="transition.denied_approval",
-                    actor_principal_id=approver_id,
-                    event_data={
-                        "transition_id": transition_id,
-                        "approver_id": approver_id,
-                        "reason": reason,
-                    },
-                    conn=conn,
-                    in_transaction=True,
+            current_stage = transition.get("stage", "")
+            if current_stage != "pending_approval":
+                raise IllegalTransitionError(
+                    f"Cannot deny transition in stage '{current_stage}'; must be 'pending_approval'"
                 )
 
-                return transition
+            # Separation of duties
+            agent_id: str = transition.get("agent_id", "")
+            if approver_id == agent_id:
+                raise SeparationOfDutiesError("The requester cannot deny their own action")
+
+            branch_id: str = transition.get("branch_id", "")
+
+            # Decide the EXISTING pending approval request for this transition.
+            # The request was created during propose(); we must NOT create a new
+            # one — that would leave the original pending forever while a new
+            # request gets decided (Issue Critical 2).
+            approval = approval_repo.find_pending_by_transition(transition_id)
+            if approval is None:
+                raise IllegalTransitionError(
+                    f"No pending approval request found for transition '{transition_id}'"
+                )
+            # decide() returns None when its `WHERE status = 'pending'` guard
+            # fails — i.e. a concurrent approver already decided this request
+            # (Issue Critical 3).  Detect the race and abort atomically; the
+            # surrounding transaction rolls back any partial work.
+            decided = approval_repo.decide(
+                request_id=approval["id"],
+                decided_by=approver_id,
+                decision="denied",
+                reason=reason,
+            )
+            if decided is None:
+                raise ApprovalAlreadyDecidedError(
+                    f"Approval request '{approval['id']}' for transition "
+                    f"'{transition_id}' was already decided by another approver"
+                )
+
+            # Advance transition to denied
+            transition = self.advance_stage(transition_id, "denied", conn=conn)
+
+            self._write_audit_event(
+                transition_id=transition_id,
+                branch_id=branch_id,
+                event_type="transition.denied_approval",
+                actor_principal_id=approver_id,
+                event_data={
+                    "transition_id": transition_id,
+                    "approver_id": approver_id,
+                    "reason": reason,
+                },
+                conn=conn,
+                in_transaction=True,
+            )
+
+            return transition
 
     # ------------------------------------------------------------------ #
     # Cancel
@@ -749,96 +749,95 @@ class TransitionEngine:
         Raises:
             IllegalTransitionError: If the transition is not in ``executing``.
         """
-        with self.engine.connect() as conn:
-            with transaction(conn):
-                transition_repo = TransitionRepository(conn)
+        with self.engine.connect() as conn, transaction(conn):
+            transition_repo = TransitionRepository(conn)
 
-                transition = transition_repo.get_transition(transition_id)
-                if transition is None:
-                    raise IllegalTransitionError(f"Transition '{transition_id}' not found")
+            transition = transition_repo.get_transition(transition_id)
+            if transition is None:
+                raise IllegalTransitionError(f"Transition '{transition_id}' not found")
 
-                current_stage: str = transition.get("stage", "")
-                if current_stage != "executing":
-                    raise IllegalTransitionError(
-                        f"Cannot record result for transition in stage '{current_stage}'; "
-                        f"must be 'executing'"
-                    )
+            current_stage: str = transition.get("stage", "")
+            if current_stage != "executing":
+                raise IllegalTransitionError(
+                    f"Cannot record result for transition in stage '{current_stage}'; "
+                    f"must be 'executing'"
+                )
 
-                branch_id: str = transition.get("branch_id", "")
-                agent_id: str = transition.get("agent_id", "")
+            branch_id: str = transition.get("branch_id", "")
+            agent_id: str = transition.get("agent_id", "")
 
-                if exit_status == "success":
-                    # Update result fields and advance to succeeded
-                    transition_repo.update_result(
-                        transition_id=transition_id,
-                        exit_status=exit_status,
-                        result_summary=result_summary,
-                        to_node_id=to_node_id,
-                    )
-                    transition = self.advance_stage(transition_id, "succeeded", conn=conn)
-                    self._write_audit_event(
-                        transition_id=transition_id,
-                        branch_id=branch_id,
-                        event_type="transition.succeeded",
-                        actor_principal_id=agent_id,
-                        event_data={
-                            "transition_id": transition_id,
-                            "exit_status": exit_status,
-                            "result_summary": result_summary,
-                            "to_node_id": to_node_id,
-                        },
-                        conn=conn,
-                        in_transaction=True,
-                    )
-                elif exit_status == "failure":
-                    # Update result fields and advance to failed
-                    transition_repo.update_result(
-                        transition_id=transition_id,
-                        exit_status=exit_status,
-                        result_summary=result_summary,
-                        to_node_id=to_node_id,
-                    )
-                    transition = self.advance_stage(transition_id, "failed", conn=conn)
-                    self._write_audit_event(
-                        transition_id=transition_id,
-                        branch_id=branch_id,
-                        event_type="transition.failed",
-                        actor_principal_id=agent_id,
-                        event_data={
-                            "transition_id": transition_id,
-                            "exit_status": exit_status,
-                            "result_summary": result_summary,
-                        },
-                        conn=conn,
-                        in_transaction=True,
-                    )
-                else:
-                    # timeout or uncertain → advance to execution_uncertain
-                    # Set requires_manual_reconciliation flag
-                    self._set_requires_manual_reconciliation(transition_id, True, conn=conn)
-                    transition_repo.update_result(
-                        transition_id=transition_id,
-                        exit_status=exit_status,
-                        result_summary=result_summary,
-                        to_node_id=to_node_id,
-                    )
-                    transition = self.advance_stage(transition_id, "execution_uncertain", conn=conn)
-                    self._write_audit_event(
-                        transition_id=transition_id,
-                        branch_id=branch_id,
-                        event_type="transition.execution_uncertain",
-                        actor_principal_id=agent_id,
-                        event_data={
-                            "transition_id": transition_id,
-                            "exit_status": exit_status,
-                            "result_summary": result_summary,
-                            "requires_manual_reconciliation": True,
-                        },
-                        conn=conn,
-                        in_transaction=True,
-                    )
+            if exit_status == "success":
+                # Update result fields and advance to succeeded
+                transition_repo.update_result(
+                    transition_id=transition_id,
+                    exit_status=exit_status,
+                    result_summary=result_summary,
+                    to_node_id=to_node_id,
+                )
+                transition = self.advance_stage(transition_id, "succeeded", conn=conn)
+                self._write_audit_event(
+                    transition_id=transition_id,
+                    branch_id=branch_id,
+                    event_type="transition.succeeded",
+                    actor_principal_id=agent_id,
+                    event_data={
+                        "transition_id": transition_id,
+                        "exit_status": exit_status,
+                        "result_summary": result_summary,
+                        "to_node_id": to_node_id,
+                    },
+                    conn=conn,
+                    in_transaction=True,
+                )
+            elif exit_status == "failure":
+                # Update result fields and advance to failed
+                transition_repo.update_result(
+                    transition_id=transition_id,
+                    exit_status=exit_status,
+                    result_summary=result_summary,
+                    to_node_id=to_node_id,
+                )
+                transition = self.advance_stage(transition_id, "failed", conn=conn)
+                self._write_audit_event(
+                    transition_id=transition_id,
+                    branch_id=branch_id,
+                    event_type="transition.failed",
+                    actor_principal_id=agent_id,
+                    event_data={
+                        "transition_id": transition_id,
+                        "exit_status": exit_status,
+                        "result_summary": result_summary,
+                    },
+                    conn=conn,
+                    in_transaction=True,
+                )
+            else:
+                # timeout or uncertain → advance to execution_uncertain
+                # Set requires_manual_reconciliation flag
+                self._set_requires_manual_reconciliation(transition_id, True, conn=conn)
+                transition_repo.update_result(
+                    transition_id=transition_id,
+                    exit_status=exit_status,
+                    result_summary=result_summary,
+                    to_node_id=to_node_id,
+                )
+                transition = self.advance_stage(transition_id, "execution_uncertain", conn=conn)
+                self._write_audit_event(
+                    transition_id=transition_id,
+                    branch_id=branch_id,
+                    event_type="transition.execution_uncertain",
+                    actor_principal_id=agent_id,
+                    event_data={
+                        "transition_id": transition_id,
+                        "exit_status": exit_status,
+                        "result_summary": result_summary,
+                        "requires_manual_reconciliation": True,
+                    },
+                    conn=conn,
+                    in_transaction=True,
+                )
 
-                return transition
+            return transition
 
     # ------------------------------------------------------------------ #
     # Reconcile
@@ -1111,7 +1110,6 @@ class TransitionEngine:
         Returns:
             The transition row as a dict, or ``None`` if not found.
         """
-        from sqlalchemy import text
 
         if conn is None:
             with self.engine.connect() as fresh_conn:
@@ -1237,7 +1235,6 @@ class TransitionEngine:
                            connection is acquired from the engine and
                            committed after the update.
         """
-        from sqlalchemy import text
 
         if conn is not None:
             self._set_requires_manual_reconciliation_impl(transition_id, value, conn)

@@ -193,122 +193,121 @@ class GovernedProxy(ABC):
         # the connection is fresh (no autobegun transaction exists).
         claimed = None
         try:
-            with self.engine.connect() as conn:
-                with serializable_transaction(conn):
-                    # --- Step 5: Policy revalidation ----------------------------
-                    if self.policy_engine is not None:
-                        # 5a. Classify the payload using the same classifier used
-                        #     at proposal.
-                        classifier = get_classifier(token.tool)
-                        if classifier is None:
-                            return ExecutionResult(
-                                success=False,
-                                exit_status="failure",
-                                result_summary=f"No classifier available for tool '{token.tool}'",
-                                execution_attempt_id=attempt_id,
-                                started_at=started_at,
-                                completed_at=self._now_iso(),
-                            )
-
-                        try:
-                            classification = classifier.classify(token.tool, payload)
-                        except Exception as exc:
-                            return ExecutionResult(
-                                success=False,
-                                exit_status="failure",
-                                result_summary=f"Classification failed: {exc!s}",
-                                execution_attempt_id=attempt_id,
-                                started_at=started_at,
-                                completed_at=self._now_iso(),
-                            )
-
-                        action_type = classification.action_type
-                        canonical_resources = classification.canonical_resources
-
-                        # 5b. Evaluate current active policies with agent/project/branch context.
-                        context = {
-                            "agent_id": token.agent_id,
-                            "project_id": token.project_id,
-                            "branch_id": token.branch_id,
-                        }
-                        resolution = self.policy_engine.evaluate(
-                            action_type=action_type,
-                            canonical_resources=canonical_resources,
-                            context=context,
-                        )
-
-                        # 5c. If the current policy resolution denies or requires
-                        #     approval, reject the action even if the hash matches.
-                        if resolution.effect in ("deny", "require_approval"):
-                            return ExecutionResult(
-                                success=False,
-                                exit_status="failure",
-                                result_summary=(
-                                    f"Action blocked by current policy: effect='{resolution.effect}'"
-                                ),
-                                execution_attempt_id=attempt_id,
-                                started_at=started_at,
-                                completed_at=self._now_iso(),
-                            )
-
-                        # 5d. Compute a fresh policy_set_hash from the matched
-                        #     policies.  Build {policy_id: version} for each matched
-                        #     policy, sort by id, and compute canonical_hash —
-                        #     matching the issuance-time computation.
-                        fresh_policy_versions: dict[str, int] = {}
-                        for match in resolution.matched_policies:
-                            p = match.policy
-                            version = (
-                                p.activation_version if p.activation_version is not None else 0
-                            )
-                            fresh_policy_versions[p.id] = int(version)
-
-                        if fresh_policy_versions:
-                            sorted_pairs = sorted(fresh_policy_versions.items())
-                            fresh_policy_set_hash = canonical_hash(sorted_pairs)
-                        else:
-                            fresh_policy_set_hash = ""
-
-                        # 5e. Compare the fresh hash to the token's policy_set_hash.
-                        if fresh_policy_set_hash != token.policy_set_hash:
-                            return ExecutionResult(
-                                success=False,
-                                exit_status="failure",
-                                result_summary="Stale authorization: effective policy set has changed",
-                                execution_attempt_id=attempt_id,
-                                started_at=started_at,
-                                completed_at=self._now_iso(),
-                            )
-
-                    # --- Step 5.5: Validate adapter payload before claim --------
-                    # (High fix 6 — prepare before claim)
-                    # Adapter-specific validation runs BEFORE the token is claimed
-                    # so that a malformed payload does not consume the authorization.
-                    validation_error = self._validate_adapter_payload(payload, token)
-                    if validation_error is not None:
+            with self.engine.connect() as conn, serializable_transaction(conn):
+                # --- Step 5: Policy revalidation ----------------------------
+                if self.policy_engine is not None:
+                    # 5a. Classify the payload using the same classifier used
+                    #     at proposal.
+                    classifier = get_classifier(token.tool)
+                    if classifier is None:
                         return ExecutionResult(
                             success=False,
                             exit_status="failure",
-                            result_summary=validation_error,
+                            result_summary=f"No classifier available for tool '{token.tool}'",
                             execution_attempt_id=attempt_id,
                             started_at=started_at,
                             completed_at=self._now_iso(),
                         )
 
-                    # --- Step 6: Atomically claim the authorization -------------
-                    # The claim must also verify the signed-token hash matches the
-                    # stored hash (High fix 6).
-                    #
-                    # auth_engine uses its own engine/connection internally.
-                    # The claim happens within the serializable transaction
-                    # context established above.
-                    claimed = self.auth_engine.verify_and_claim(
-                        authorization_id=token.authorization_id,
-                        signed_token=signed_token,
-                        payload_hash=actual_payload_hash,
-                        proxy_principal_id=self.config.ep_service_principal_id,
-                        public_key=public_key,
+                    try:
+                        classification = classifier.classify(token.tool, payload)
+                    except Exception as exc:
+                        return ExecutionResult(
+                            success=False,
+                            exit_status="failure",
+                            result_summary=f"Classification failed: {exc!s}",
+                            execution_attempt_id=attempt_id,
+                            started_at=started_at,
+                            completed_at=self._now_iso(),
+                        )
+
+                    action_type = classification.action_type
+                    canonical_resources = classification.canonical_resources
+
+                    # 5b. Evaluate current active policies with agent/project/branch context.
+                    context = {
+                        "agent_id": token.agent_id,
+                        "project_id": token.project_id,
+                        "branch_id": token.branch_id,
+                    }
+                    resolution = self.policy_engine.evaluate(
+                        action_type=action_type,
+                        canonical_resources=canonical_resources,
+                        context=context,
                     )
+
+                    # 5c. If the current policy resolution denies or requires
+                    #     approval, reject the action even if the hash matches.
+                    if resolution.effect in ("deny", "require_approval"):
+                        return ExecutionResult(
+                            success=False,
+                            exit_status="failure",
+                            result_summary=(
+                                f"Action blocked by current policy: effect='{resolution.effect}'"
+                            ),
+                            execution_attempt_id=attempt_id,
+                            started_at=started_at,
+                            completed_at=self._now_iso(),
+                        )
+
+                    # 5d. Compute a fresh policy_set_hash from the matched
+                    #     policies.  Build {policy_id: version} for each matched
+                    #     policy, sort by id, and compute canonical_hash —
+                    #     matching the issuance-time computation.
+                    fresh_policy_versions: dict[str, int] = {}
+                    for match in resolution.matched_policies:
+                        p = match.policy
+                        version = (
+                            p.activation_version if p.activation_version is not None else 0
+                        )
+                        fresh_policy_versions[p.id] = int(version)
+
+                    if fresh_policy_versions:
+                        sorted_pairs = sorted(fresh_policy_versions.items())
+                        fresh_policy_set_hash = canonical_hash(sorted_pairs)
+                    else:
+                        fresh_policy_set_hash = ""
+
+                    # 5e. Compare the fresh hash to the token's policy_set_hash.
+                    if fresh_policy_set_hash != token.policy_set_hash:
+                        return ExecutionResult(
+                            success=False,
+                            exit_status="failure",
+                            result_summary="Stale authorization: effective policy set has changed",
+                            execution_attempt_id=attempt_id,
+                            started_at=started_at,
+                            completed_at=self._now_iso(),
+                        )
+
+                # --- Step 5.5: Validate adapter payload before claim --------
+                # (High fix 6 — prepare before claim)
+                # Adapter-specific validation runs BEFORE the token is claimed
+                # so that a malformed payload does not consume the authorization.
+                validation_error = self._validate_adapter_payload(payload, token)
+                if validation_error is not None:
+                    return ExecutionResult(
+                        success=False,
+                        exit_status="failure",
+                        result_summary=validation_error,
+                        execution_attempt_id=attempt_id,
+                        started_at=started_at,
+                        completed_at=self._now_iso(),
+                    )
+
+                # --- Step 6: Atomically claim the authorization -------------
+                # The claim must also verify the signed-token hash matches the
+                # stored hash (High fix 6).
+                #
+                # auth_engine uses its own engine/connection internally.
+                # The claim happens within the serializable transaction
+                # context established above.
+                claimed = self.auth_engine.verify_and_claim(
+                    authorization_id=token.authorization_id,
+                    signed_token=signed_token,
+                    payload_hash=actual_payload_hash,
+                    proxy_principal_id=self.config.ep_service_principal_id,
+                    public_key=public_key,
+                )
 
         except OperationalError:
             # Serialization conflict — a concurrent transaction modified
