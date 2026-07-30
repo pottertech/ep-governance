@@ -7,8 +7,9 @@ A binding governance system for AI agents. It maintains a persistent directed ac
 Enforced mode verified (July 30, 2026). Full pipeline tested against NAS PostgreSQL:
 propose, policy evaluation, Ed25519 token issuance, governed proxy execution,
 graph node creation, branch head advancement. Token reuse and payload tampering
-rejected. 918 tests pass (unit, property, contract, integration, concurrency stress,
-adversarial SQL/shell, migration, fault injection), 4 end-to-end enforced mode tests pass.
+rejected. 972 tests pass (unit, property, contract, integration, concurrency stress,
+adversarial SQL/shell, migration, fault injection, fuzz, network partition, MCP server,
+PG integration), 4 end-to-end enforced mode tests pass.
 
 ## Governing Documents
 
