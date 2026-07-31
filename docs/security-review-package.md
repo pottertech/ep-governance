@@ -154,7 +154,7 @@ pip-audit --strict
 ## Reviewer Instructions
 
 1. Clone the repo: `git clone https://github.com/pottertech/ep-governance.git`
-2. Read the governing design documents in ~/Downloads (v1.1 and v1.1.1)
+2. Read the governing design documents in `docs/specification/` (design-v1.1.md and formal-semantics-v1.1.1.md)
 3. Review each component listed above using the review questions
 4. Run the automated security scans
 5. Document findings as: CRITICAL / HIGH / MEDIUM / LOW / INFO

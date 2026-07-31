@@ -4,19 +4,29 @@ A binding governance system for AI agents. It maintains a persistent directed ac
 
 ## Status
 
-Enforced mode verified (July 30, 2026). Full pipeline tested against NAS PostgreSQL:
+Enforced mode verified (July 30, 2026). Full pipeline tested:
 propose, policy evaluation, Ed25519 token issuance, governed proxy execution,
 graph node creation, branch head advancement. Token reuse and payload tampering
-rejected. 972 tests pass (unit, property, contract, integration, concurrency stress,
-adversarial SQL/shell, migration, fault injection, fuzz, network partition, MCP server,
-PG integration), 4 end-to-end enforced mode tests pass.
+rejected. 972 tests pass, 4 end-to-end enforced mode tests pass.
 
 ## Governing Documents
 
-1. `ep-governance-design-v1.1.md` — architectural specification (v1.1)
-2. `ep-governance-design-v1.1.1.md` — controlling formal-semantics addendum (v1.1.1)
+1. [docs/specification/design-v1.1.md](docs/specification/design-v1.1.md) — architectural specification (v1.1)
+2. [docs/specification/formal-semantics-v1.1.1.md](docs/specification/formal-semantics-v1.1.1.md) — controlling formal-semantics addendum (v1.1.1)
 
 Where the two conflict, v1.1.1 governs.
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Getting Started](docs/getting-started.md) | Complete tutorial: zero to first governed execution |
+| [Architecture](docs/architecture.md) | System design, components, data flow |
+| [Threat Model](docs/threat-model.md) | Assets, trust boundaries, attacks resisted and not resisted |
+| [Enforced Mode Deployment](docs/deployment/enforced-mode.md) | Production deployment guide with secrets, networking, TLS |
+| [Configuration Reference](docs/reference/configuration.md) | Every environment variable with component, default, description |
+| [Operational Runbooks](docs/operations/runbooks.md) | Procedures for production incidents |
+| [Security Review Package](docs/security-review-package.md) | Independent review checklist with file locations and questions |
 
 ## What EP-Governance Does
 
@@ -45,6 +55,10 @@ pip install -e ".[postgres,crypto,dev]"
 ep-governance init
 ```
 
+See [Getting Started](docs/getting-started.md) for a complete walkthrough including
+database setup, signing key generation, principal registration, and your first
+governed action.
+
 ## Enforced Mode Deployment Requirements
 
 To achieve binding enforcement (not merely advisory):
@@ -56,13 +70,28 @@ To achieve binding enforcement (not merely advisory):
 5. Expose only `ep_execute` and governance management tools to the agent.
 6. Do not expose raw shell, database, email, Docker, or Git tools to the agent.
 
-Without these deployment measures, EP-Governance operates in advisory mode regardless of the `EP_MODE=enforced` setting.
+Without these deployment measures, EP-Governance operates in advisory mode regardless of the `EP_MODE=enforced` setting. See [Enforced Mode Deployment](docs/deployment/enforced-mode.md) for a complete guide.
 
 ## Verification
 
 ```bash
 ./scripts/verify.sh
 ```
+
+### Test Reproducibility
+
+| Item | Value |
+|------|-------|
+| Tested commit | `ec652fe` (July 30, 2026) |
+| Python | 3.12+ |
+| PostgreSQL | 17 (Docker container for PG integration tests) |
+| SQLite | Built-in (default for unit/property/contract tests) |
+| Total tests | 972 passed, 1 skipped, 0 failed |
+| Test categories | unit (342), property (54), contract (127), integration (415), security (50), concurrency (4), e2e (4) |
+| Duration | ~35 seconds (SQLite), ~55 seconds (with PG integration) |
+| Skipped tests | PostgreSQL-only tests that require `EP_TEST_DB_URL` environment variable |
+| PG integration tests | Set `EP_TEST_DB_URL=postgresql://user:pass@host:port/db` and run `pytest tests/integration/test_pg_integration.py` |
+| CI | Not yet configured |
 
 ## License
 

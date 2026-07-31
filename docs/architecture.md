@@ -129,8 +129,7 @@ If `EP_MODE=enforced` but deployment requirements are not met, the system operat
 
 ### 3.4 Verified Deployment (July 30, 2026)
 
-Enforced mode has been verified end-to-end against NAS PostgreSQL (100.98.247.27:5433,
-ep_governance schema in gbrain_pilot_test). The full pipeline was tested:
+Enforced mode has been verified end-to-end against PostgreSQL. The full pipeline was tested:
 
 1. Propose SELECT 1 → policy engine matched allow policy → transition authorized
 2. Ed25519-signed authorization token issued (payload-bound, agent-bound, branch-bound, single-use, 5-min TTL)
