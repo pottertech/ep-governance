@@ -19,6 +19,14 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
+
+# Skip all tests in this module when EP_TEST_DB_URL is not set.
+# This prevents 10 errors from appearing in the default test run.
+pytestmark = pytest.mark.skipif(
+    not os.getenv("EP_TEST_DB_URL"),
+    reason="EP_TEST_DB_URL is required for PostgreSQL integration tests",
+)
+
 import sqlalchemy as sa
 
 from ep_governance.audit import AuditWriter, AuditVerifier

@@ -470,15 +470,15 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 
 ### Maintenance Sequence
 
-1. **Stop new authorization issuance.** Pause or stop the EP service so no new tokens are signed with the old key.
-2. **Wait for outstanding tokens to expire.** The default token TTL is 5 minutes (`EP_TOKEN_TTL_SECONDS=300`). Wait at least this long, or explicitly expire outstanding authorizations:
+1. **Stop new authorization issuance.** Pause or stop the EP service so no new tokens are signed with the old key. The management CLI connects directly to the governance database and remains usable while the MCP/service process is stopped.
+2. **Wait for outstanding tokens to expire.** The default token TTL is 5 minutes (`EP_TOKEN_TTL_SECONDS=300`). Wait at least this long, or explicitly expire outstanding authorizations using the CLI (which connects directly to the governance database, not through the service):
    ```bash
    # For each transition still in 'authorized' stage:
    ep-governance expire --transition <TRANSITION_ID> --reason "Key rotation — expiring outstanding authorizations"
    ```
 3. **Stop the EP service** if not already stopped.
 4. **Install the new private key** (generated above) on the EP service host.
-5. **Set the new public key on the proxy.** Update `EP_PUBLIC_KEY` in the proxy's environment to the value printed in step 1:
+5. **Set the new public key on the proxy.** Update `EP_PUBLIC_KEY` in the proxy's environment to the value printed by the key-generation command above:
    ```bash
    # Update EP_PUBLIC_KEY in the proxy's .env file or secret manager
    ```
@@ -487,12 +487,20 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    docker restart ep-governance-proxy
    ```
 7. **Restart the EP service** so it loads the new signing key.
-8. **Verify the rotation** by running a governed test action:
+8. **Verify the rotation** by running a governed test action. Follow the complete pipeline from the [Getting Started guide](../getting-started.md) section 8:
    ```bash
-   # Propose and execute a test SELECT through the full pipeline
-   ep-governance check --tool postgres.execute --arguments '{"sql": "SELECT 1"}' --branch <BRANCH_ID> --agent <AGENT_ID> --json
+   # Step 1: Propose and authorize
+   ep-governance execute \
+     --tool postgres.execute \
+     --arguments '{"sql": "SELECT 1"}' \
+     --branch <BRANCH_ID> \
+     --agent <AGENT_ID> \
+     --json
+
+   # Step 2: Issue a token (using the EP service, which now signs with the new key)
+   # Step 3: Send the token to the proxy (see getting-started.md section 8.3)
    ```
-   Then issue a token and send it to the proxy. Confirm:
+   Confirm:
    - Token is accepted (new key works)
    - Token reuse is rejected (single-use enforced)
    - Audit chain is valid: `ep-governance audit verify --lattice <LATTICE_ID>`
