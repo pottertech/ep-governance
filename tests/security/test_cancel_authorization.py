@@ -166,13 +166,13 @@ class TestCancelAuthorization:
     """Test that only the originating agent can cancel."""
 
     def test_unrelated_agent_cannot_cancel(self, conn, engine, setup, ep_service_id, agent_id, other_agent_id):
-        """An agent that did not propose the transition should not be able to cancel it.
+        """An agent that did not propose the transition must NOT be able to cancel it.
 
-        Note: The current cancel() implementation does not verify that the
-        cancelling agent is the same as the proposing agent. This test
-        documents that gap. If the implementation adds this check, this
-        test should be updated to expect rejection.
+        Only the originating agent or an administrator may cancel a transition.
+        An unrelated agent must receive an AuthorizationError.
         """
+        from ep_governance.errors import AuthorizationError
+
         trans_engine = TransitionEngine(engine, ep_service_id)
         transition = trans_engine.propose(
             agent_id=agent_id,
@@ -183,18 +183,14 @@ class TestCancelAuthorization:
         )
         conn.commit()
 
-        # The current implementation accepts any agent_id for cancellation.
-        # This is a known security gap — the cancel method should verify
-        # that the cancelling agent is the originating agent or an admin.
-        # For now, we test that the command does not crash:
-        try:
-            result = trans_engine.cancel(transition["id"], other_agent_id)
-            conn.commit()
-            # If it succeeds, the implementation allows cross-agent cancellation
-            assert result["stage"] == "cancelled"
-        except Exception:
-            # If it rejects, that's even better
-            conn.rollback()
+        # Agent B (not the originating agent) must be rejected
+        with pytest.raises(AuthorizationError):
+            trans_engine.cancel(transition["id"], other_agent_id)
+        conn.rollback()
+
+        # Verify the transition was NOT cancelled
+        t = trans_engine.get_transition(transition["id"])
+        assert t["stage"] != "cancelled", "Transition should not be cancelled by unrelated agent"
 
 
 class TestCancelLifecycle:

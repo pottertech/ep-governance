@@ -642,6 +642,10 @@ class TransitionEngine:
     ) -> dict[str, Any]:
         """Cancel a transition that is not yet executing.
 
+        Only the originating agent (the agent that proposed the transition)
+        or an administrator may cancel it. An unrelated agent will receive
+        an AuthorizationError.
+
         Args:
             transition_id: XID of the transition to cancel.
             agent_id:     XID of the agent requesting the cancellation.
@@ -652,7 +656,12 @@ class TransitionEngine:
         Raises:
             IllegalTransitionError: If the transition is in a stage that
                                     cannot be cancelled.
+            AuthorizationError: If the requesting agent is not the
+                                originating agent and is not an
+                                administrator.
         """
+        from .errors import AuthorizationError
+
         with self.engine.connect() as conn:
             transition_repo = TransitionRepository(conn)
 
@@ -667,6 +676,36 @@ class TransitionEngine:
                     f"Cannot cancel transition in stage '{current_stage}'; "
                     f"must be one of {sorted(cancellable_stages)}"
                 )
+
+            # Authorization check: only the originating agent or an
+            # administrator may cancel the transition.
+            originating_agent: str = transition.get("agent_id", "")
+            if agent_id != originating_agent:
+                # Check if the requesting agent is an administrator
+                # by looking up role bindings in the database.
+                is_admin = False
+                try:
+                    result = conn.execute(
+                        sa.text(
+                            "SELECT COUNT(*) FROM ep_role_bindings rb "
+                            "JOIN ep_roles r ON rb.role_id = r.id "
+                            "WHERE rb.principal_id = :pid AND r.name = 'administrator' "
+                            "AND rb.status = 'active'"
+                        ),
+                        {"pid": agent_id},
+                    )
+                    is_admin = result.scalar() > 0
+                except Exception:
+                    # If the role tables don't exist or the query fails,
+                    # deny the cancellation (fail closed).
+                    is_admin = False
+
+                if not is_admin:
+                    raise AuthorizationError(
+                        f"Agent '{agent_id}' is not authorized to cancel transition "
+                        f"'{transition_id}' — only the originating agent "
+                        f"'{originating_agent}' or an administrator may cancel it."
+                    )
 
             branch_id: str = transition.get("branch_id", "")
 

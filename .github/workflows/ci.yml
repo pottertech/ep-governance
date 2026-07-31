@@ -28,10 +28,17 @@ jobs:
         run: pytest tests/ -q --tb=short
 
       - name: Bandit security scan
-        run: bandit -r src/ -f json -o bandit-report.json || true
+        run: bandit -r src/ -f json -o bandit-report.json
 
       - name: Dependency audit
-        run: pip-audit || true
+        run: pip-audit
+
+      - name: Upload Bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
 
   test-postgres:
     name: PostgreSQL integration tests
@@ -39,7 +46,7 @@ jobs:
     needs: test-sqlite
     services:
       postgres:
-        image: postgres:16-alpine
+        image: postgres:17-alpine
         env:
           POSTGRES_USER: ep_test
           POSTGRES_PASSWORD: ep_test_pw
@@ -64,10 +71,10 @@ jobs:
           pip install --upgrade pip
           pip install -e ".[postgres,crypto,dev]"
 
-      - name: Run PostgreSQL integration tests
+      - name: Run full test suite with PostgreSQL
         env:
           EP_TEST_DB_URL: postgresql://ep_test:ep_test_pw@localhost:5432/ep_governance_test
-        run: pytest tests/integration/test_pg_integration.py -v --tb=short
+        run: pytest tests/ -q --tb=short
 
   cli-smoke:
     name: CLI smoke tests
