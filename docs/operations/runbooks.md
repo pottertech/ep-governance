@@ -8,7 +8,7 @@
 
 | Component | Host | Notes |
 |-----------|------|-------|
-| EP Service | EP host | Runs `ep-governance serve`, holds Ed25519 signing key, writes audit events. |
+| EP Service | EP service host | Runs `ep-governance serve`, holds Ed25519 signing key, writes audit events. |
 | Governed Proxy | Proxy host (Docker) | Separate process/container with target credentials; verifies tokens, executes actions. |
 | Agents | Agent hosts | Submit proposals via `ep_execute`; have no target credentials. |
 | Database | Database host (PostgreSQL) | Shared by EP service and proxy. SQLite acceptable for dev only. |
@@ -75,9 +75,8 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    docker restart ep-governance-proxy
    ```
 3. If the transition has been stuck for more than a few minutes and the proxy is not going to report a result, manually advance it to `execution_uncertain` by calling `record_result` with `exit_status="timeout"`:
-   ```python
-   ep-governance mark-uncertain --transition <TRANSITION_ID> --reason "Operator intervention"",
-   )
+   ```bash
+   ep-governance mark-uncertain --transition <TRANSITION_ID> --reason "Operator intervention"
    ```
    This sets `requires_manual_reconciliation=TRUE` and moves the stage to `execution_uncertain`.
 4. Follow **RB-02** (execution_uncertain) to reconcile.
@@ -120,17 +119,13 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 ### Immediate Action
 1. **Determine the true outcome:** did the action succeed or fail on the target system?
 2. **Reconcile as succeeded** (only if the action truly completed and the target state is correct):
-   ```python
-   ep-governance reconcile --transition <TRANSITION_ID> --outcome succeeded --reason "Operator confirmed" --branch <BRANCH_ID>",
-       branch_committer=branch_committer,  # REQUIRED for succeeded
-       lattice_id="<lattice_id>",
-   )
+   ```bash
+   ep-governance reconcile --transition <TRANSITION_ID> --outcome succeeded --reason "Operator confirmed" --branch <BRANCH_ID>
    ```
-   The `branch_committer` must be provided — successful reconciliation atomically creates a graph node and advances the branch head. Without it, the call raises `IllegalTransitionError`.
+   Successful reconciliation atomically creates a graph node and advances the branch head.
 3. **Reconcile as failed** (if the action did not complete or the target is in an inconsistent state):
-   ```python
-   ep-governance reconcile --transition <TRANSITION_ID> --outcome succeeded --reason "Operator confirmed" --branch <BRANCH_ID>",
-   )
+   ```bash
+   ep-governance reconcile --transition <TRANSITION_ID> --outcome failed --reason "Operator confirmed"
    ```
    No graph node is created. The transition advances to `failed`.
 
@@ -140,7 +135,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 - If reconcile-as-succeeded fails because branch commitment fails again, the transition stays at `execution_uncertain` with `requires_manual_reconciliation=TRUE`. Retry after resolving the branch conflict.
 
 ### Prevention
-- Ensure network reliability between the proxy (proxy host) and EP service (Mac).
+- Ensure network reliability between the proxy host and EP service host.
 - Monitor for `transition.execution_uncertain` audit events and alert immediately.
 - Keep the reconciliation queue empty — every uncertain transition is a governance gap.
 
@@ -167,9 +162,9 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    ```bash
    docker logs --tail 200 ep-governance-proxy
    ```
-4. Verify network connectivity from the EP service host (EP service) to the proxy host proxy port:
+4. Verify network connectivity from the EP service host to the proxy port:
    ```bash
-   nc -zv <nas-ip> <proxy-port>
+   nc -zv <proxy-host> <proxy-port>
    ```
 5. Check the proxy host Docker daemon:
    ```bash
@@ -185,7 +180,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 2. If the container is in a crash loop, inspect the logs for the root cause (missing config, DB connection failure, invalid key file). Fix the underlying issue before restarting.
 3. If the container is healthy but unreachable from the EP service host, check:
    - proxy host firewall rules.
-   - Tailscale/network connectivity between EP service host and proxy host.
+   - Mesh VPN/network connectivity between EP service host and proxy host.
    - Docker port mappings (`docker port ep-governance-proxy`).
 4. If the proxy cannot be revived quickly, transitions in `authorized` will remain there. They are not lost — once the proxy is back, agents can retry `ep_execute` with the same authorization token (if it has not expired, TTL default 5 min). If tokens have expired, agents must re-propose.
 
@@ -217,7 +212,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    ```
 2. Attempt a direct connection:
    ```bash
-   psql -h <nas-ip> -U ep_governance -d ep_governance -c "SELECT 1;"
+   psql -h <database-host> -U ep_governance -d ep_governance -c "SELECT 1;"
    ```
 3. Check PostgreSQL logs:
    ```bash
@@ -227,9 +222,9 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    ```bash
    df -h
    ```
-5. Check proxy host system resources (memory, CPU):
+5. Check database host system resources (memory, CPU):
    ```bash
-   free -h && ssh proxy-host top -bn1 | head -5
+   free -h && top -bn1 | head -5
    ```
 
 ### Immediate Action
@@ -245,11 +240,11 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 6. Once the database is back, restart the EP service and proxy in order:
    ```bash
    # 1. Verify DB
-   psql -h <nas-ip> -U ep_governance -d ep_governance -c "SELECT 1;"
+   psql -h <database-host> -U ep_governance -d ep_governance -c "SELECT 1;"
    # 2. Restart proxy
    docker restart ep-governance-proxy
    # 3. Restart EP service
-   # (depends on your launch method — launchctl, systemd, etc.)
+   # (depends on your launch method — systemd, etc.)
    ```
 7. After recovery, verify audit chain integrity:
    ```bash
@@ -412,13 +407,13 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 
 ### Immediate Action
 1. **If the transition is still in `authorized`:** The transition can be expired to clean up:
-   ```python
-   ep-governance mark-uncertain --transition <TRANSITION_ID> --reason "Operator advancing stale transition"
+   ```bash
+   ep-governance expire --transition <TRANSITION_ID> --reason "Operator advancing stale transition"
    ```
    This is a legal transition: `authorized → expired`.
 2. **If the transition is in `pending_approval`:** Similarly, it can be expired:
-   ```python
-   ep-governance mark-uncertain --transition <TRANSITION_ID> --reason "Operator advancing stale transition"
+   ```bash
+   ep-governance expire --transition <TRANSITION_ID> --reason "Operator advancing stale transition"
    ```
    Legal transition: `pending_approval → expired`.
 3. **The agent must re-propose** the action with a new idempotency key. The old transition is terminal (`expired`) and cannot be re-authorized.
@@ -457,19 +452,12 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 
 ### Immediate Action
 1. **Generate a new Ed25519 keypair:**
-   ```python
-   from ep_governance.authorizations import KeyManager
-   km = KeyManager()  # generates a new keypair
-   km.save_private_key("/var/lib/ep-governance/ep_signing.key")
-   # The public key is available at km.public_key
+   ```bash
+   # Generate a new 32-byte Ed25519 private key
+   python3 -c "from ep_governance.authorizations import KeyManager; km = KeyManager(); km.save_private_key('/var/lib/ep-governance/ep_signing.key')"
    ```
    Ensure the file is written with mode `0600` (`save_private_key` does this automatically).
-2. **Update the proxy's public key.** The proxy needs the new public key to verify tokens signed by the new private key. Distribute the new public key to the proxy configuration:
-   ```python
-   new_public_key_bytes = km.public_key.encode()
-   # Write to the proxy's public key path and restart the proxy
-   ```
-   Restart the proxy after updating:
+2. **Update the proxy's public key.** The proxy needs the new public key to verify tokens signed by the new private key. Distribute the new public key to the proxy configuration and restart the proxy:
    ```bash
    docker restart ep-governance-proxy
    ```
@@ -492,7 +480,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 - Review file system monitoring to alert on deletion or modification of the key file.
 
 ### Prevention
-- Store the signing key in a secure key management system (HSM, Vault, macOS Keychain) rather than a plain file.
+- Store the signing key in a secure key management system (HSM, Vault) rather than a plain file.
 - Maintain encrypted backups of the signing key in at least two locations.
 - Monitor the key file with file integrity monitoring (FIM) — alert on any change.
 - Test key rotation periodically (quarterly) so the procedure is practiced.
@@ -525,18 +513,17 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 
 ### Immediate Action
 1. **Revoke the agent's credentials.** Update the agent registry / identity provider to disable the compromised agent. This prevents new proposals from being authenticated.
-2. **Cancel all non-terminal transitions** for the compromised agent:
-   ```python
-   for tid in compromised_transition_ids:
-       if stage in ("proposed", "pending_approval", "authorized"):
-           ep-governance cancel --transition <TRANSITION_ID>
+2. **Expire all non-terminal transitions** for the compromised agent:
+   ```bash
+   # For transitions in authorized or pending_approval stage:
+   ep-governance expire --transition <TRANSITION_ID> --reason "Credential compromise — operator cleanup"
    ```
+   Repeat for each affected transition ID.
 3. **Expire any authorized-but-unclaimed tokens** for the agent to prevent proxy execution:
-   ```python
-   for tid in authorized_transition_ids:
-       ep-governance mark-uncertain --transition <TRANSITION_ID> --reason "Operator advancing stale transition"
+   ```bash
+   ep-governance expire --transition <TRANSITION_ID> --reason "Credential compromise — expiring unclaimed token"
    ```
-4. **Do NOT cancel or expire transitions in `executing`** — these may have already been claimed by the proxy and the action may be in progress. Instead, monitor them and reconcile once complete (see RB-02).
+4. **Do NOT expire transitions in `executing`** — these may have already been claimed by the proxy and the action may be in progress. Instead, monitor them and reconcile once complete (see RB-02).
 5. **Review all executed actions** by the compromised agent. If any caused harmful side effects on target systems, initiate remediation on those systems directly (rollback database changes, stop containers, etc.).
 6. **Verify audit chain integrity** to ensure the attacker did not tamper with the audit log:
    ```bash
@@ -649,16 +636,11 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 
 ### Immediate Action
 1. **Confirm the action succeeded on the target system** (same as RB-02 diagnosis).
-2. **Reconcile with updated branch head expectations.** Use the `reconcile` method with the current branch head as the expected head:
-   ```python
-   ep-governance reconcile --transition <TRANSITION_ID> --outcome succeeded --reason "Operator confirmed" --branch <BRANCH_ID>",
-       branch_committer=branch_committer,
-       expected_head_id="<current_head_node_id>",  # use current, not original
-       expected_version=<current_version>,
-       lattice_id="<lattice_id>",
-   )
+2. **Reconcile with updated branch head expectations.** Use the `reconcile` command with the current branch head:
+   ```bash
+   ep-governance reconcile --transition <TRANSITION_ID> --outcome succeeded --reason "Operator confirmed" --branch <BRANCH_ID>
    ```
-   The `reconcile` method reads the current branch head if `expected_head_id` is not provided, but explicitly passing it ensures the commit targets the correct state.
+   The command reads the current branch head to ensure the commit targets the correct state.
 3. **If reconcile-as-succeeded fails again** (another concurrent commit moved the head), retry with the updated head. The transition remains at `execution_uncertain` between retries.
 4. **If the conflict cannot be resolved** (e.g., the action's effects are incompatible with the newer branch state), reconcile as `failed` and have the agent re-propose.
 
@@ -713,7 +695,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    - Restore the database from the most recent backup taken before the migration attempt.
    ```bash
    # Restore from backup
-   psql -h <nas-ip> -U ep_governance -d ep_governance < backup.sql
+   psql -h <database-host> -U ep_governance -d ep_governance < backup.sql
    ```
    - Re-run migrations after fixing the migration script.
 5. **If the migration includes data transformations** (not just DDL) and the data transform failed partway:
@@ -735,7 +717,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 ### Prevention
 - **Always take a database backup before running migrations.** Automate this:
   ```bash
-  pg_dump -h <nas-ip> -U ep_governance ep_governance > pre_migration_backup_$(date +%Y%m%d_%H%M%S).sql
+  pg_dump -h <database-host> -U ep_governance ep_governance > emergency_backup_$(date +%Y%m%d_%H%M%S).sql
   ```
 - Test migrations on a staging database that mirrors production before deploying.
 - Run migrations in a transaction so partial failures roll back automatically (PostgreSQL supports transactional DDL).
@@ -747,8 +729,8 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 ## RB-13: Network Partition
 
 ### Symptoms
-- The EP service (Mac) cannot reach the proxy (proxy host) or the database (proxy host).
-- The proxy (proxy host) cannot reach the EP service (Mac) to report results.
+- The EP service (EP service host) cannot reach the proxy (proxy host) or the database (database host).
+- The proxy (proxy host) cannot reach the EP service (EP service host) to report results.
 - Agents (EP service host, agent host) cannot reach the EP service to propose or execute.
 - Operations fail with connection timeouts or `OperationalError`.
 - Some components are functioning normally while others are isolated.
@@ -757,17 +739,18 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 1. Test connectivity from each component to every other component:
    ```bash
    # EP service host → proxy host (proxy)
-   nc -zv <nas-ip> <proxy-port>
-   # EP service host → proxy host (database)
-   nc -zv <nas-ip> 5432
+   nc -zv <proxy-host> <proxy-port>
+   # EP service host → database host (database)
+   nc -zv <database-host> 5432
    # proxy host → EP service host (EP service)
-   ssh proxy-host nc -zv <mac-ip> <ep-service-port>
+   ssh <proxy-host> nc -zv <ep-service-host> <ep-service-port>
    # agent host → EP service host (EP service)
-   ssh agent host nc -zv <mac-ip> <ep-service-port>
+   ssh <agent-host> nc -zv <ep-service-host> <ep-service-port>
    ```
-2. Check if Tailscale or the VPN is connected:
+2. Check if the VPN or mesh network is connected:
    ```bash
-   tailscale status
+   # Example: check VPN / mesh network status
+   # (command depends on your network setup)
    ```
 3. Check for asymmetric partitions — the EP service host might reach the proxy host but not vice versa.
 4. Check for DNS resolution failures if hostnames are used.
@@ -775,12 +758,12 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 
 ### Immediate Action
 1. **Identify and fix the network issue:**
-   - If Tailscale/VPN is down: restart it or wait for it to reconnect.
+   - If the VPN/mesh network is down: restart it or wait for it to reconnect.
    - If a switch or router is down: escalate to network operations.
    - If a host is down: see RB-03 (proxy) or RB-04 (database).
 2. **During the partition, the system degrades as follows:**
    - **EP service host ↔ proxy host partition:** EP service cannot write audit events or transitions. Proxy cannot report results. Transitions in `executing` will eventually become `execution_uncertain` (see RB-02). No new proposals can be made.
-   - **agent host ↔ EP service host partition:** Cloudhub agents cannot propose or execute. EP service host agents continue normally. No impact on governance state.
+   - **agent host ↔ EP service host partition:** Agent-host agents cannot propose or execute. EP service host agents continue normally. No impact on governance state.
    - **proxy host internal (proxy ↔ database):** Proxy cannot claim authorizations or record results. Transitions stay in `authorized`. See RB-03 and RB-04.
 3. **Do NOT attempt to force operations during a partition.** Writing to a disconnected component may cause split-brain or data loss.
 4. **Once connectivity is restored:**
@@ -799,7 +782,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 - Test the recovery procedure after a simulated partition.
 
 ### Prevention
-- Use Tailscale or a mesh VPN for resilient connectivity between EP service host, proxy host, and agent host.
+- Use a mesh VPN or resilient network connectivity between EP service host, proxy host, and agent host.
 - Configure DNS with short TTLs and multiple resolvers.
 - Implement health checks between all components and alert on failures within 60 seconds.
 - Have a documented escalation path for network issues.
@@ -830,19 +813,18 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    ```
 2. **Stop the EP service** to prevent new authorizations from being issued:
    ```bash
-   # On EP service host — depends on launch method:
-   # launchctl: launchctl stop com.ep-governance.service
+   # On EP service host — depends on your launch method:
    # systemd:  systemctl stop ep-governance
    # manual:   kill <ep-service-pid>
    ```
 3. **Stop or suspend agents** to prevent them from retrying `ep_execute` calls:
    - EP service host agents: stop the agent processes.
-   - Cloudhub agents: `ssh agent host '<stop-command>'`
+   - Agent-host agents: `ssh <agent-host> '<stop-command>'`
 4. **Record the shutdown time** — all transitions in non-terminal stages will remain in their current state. This is correct and expected; they will be reconciled during recovery.
 5. **Do NOT modify the database directly** during shutdown. The audit chain and transition state must be preserved for investigation.
 6. **Take a database backup** for forensic analysis (if the database is still accessible):
    ```bash
-   pg_dump -h <nas-ip> -U ep_governance ep_governance > emergency_backup_$(date +%Y%m%d_%H%M%S).sql
+   pg_dump -h <database-host> -U ep_governance ep_governance > emergency_backup_$(date +%Y%m%d_%H%M%S).sql
    ```
 7. **Notify all stakeholders:**
    - Operators and on-call team.

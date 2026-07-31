@@ -84,7 +84,6 @@ The agent has **neither** credential.
 | `EP_PROXY_PORT` | no | `8201` | no | TCP port the proxy listens on. Must be an integer. |
 | `EP_PUBLIC_KEY` | **yes** | *(none)* | no | Ed25519 public key (32 bytes encoded as 64 hexadecimal characters), used to verify governance tokens. |
 | `EP_EP_SERVICE_ID` | **yes** | *(none)* | no | XID of the EP-Governance service principal used for token issuance validation. |
-| `EP_SIGNING_KEY_FILE` | no | *(none)* | yes | Filesystem path to the Ed25519 private signing key (32 raw bytes, mode 0600). Used by the EP service to sign authorization tokens. In production, prefer Docker secrets, systemd credentials, or Vault over a plaintext file. |
 
 ---
 

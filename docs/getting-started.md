@@ -472,7 +472,7 @@ This command:
 2. Evaluates policies (allow policy matches, deny does not → admissible)
 3. Returns the transition with `stage: authorized`
 
-> **Important:** The CLI `execute` command proposes and authorizes the transition. It does **not** call the proxy. To complete the full pipeline, the agent (or a script) must issue a signed authorization token and send it with the payload to the proxy's `/execute` HTTP endpoint. See the next step.
+> **Important:** The CLI `execute` command proposes and authorizes the transition. It does **not** call the proxy. To complete the full pipeline, the EP service issues a signed Ed25519 authorization token (payload-bound, agent-bound, branch-bound, single-use, 5-minute TTL). The caller then forwards that exact token and payload to the proxy's `/execute` HTTP endpoint. See the next step.
 
 ### 8.3 Send the token to the proxy
 

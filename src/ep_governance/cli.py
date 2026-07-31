@@ -1043,6 +1043,32 @@ def reconcile(
         raise typer.Exit(1)
 
 
+@app.command()
+def expire(
+    transition: str = typer.Option(..., "--transition", help="Transition XID to expire."),
+    reason: str = typer.Option("Authorization expired", "--reason", "-r"),
+    json: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """Expire a transition that is authorized or pending_approval.
+
+    Use when an authorization has been issued but never claimed, or
+    an approval request has timed out. This moves the transition to
+    the 'expired' terminal state. Only valid from 'authorized' or
+    'pending_approval' stages.
+    """
+    try:
+        conn = _get_conn()
+        ep_id = _ensure_ep_service_principal(conn)
+        trans_engine = TransitionEngine(conn.engine, ep_id)
+        result = trans_engine.advance_stage(transition, "expired")
+        conn.commit()
+        conn.close()
+        _output({"transition_id": transition, "stage": result["stage"], "reason": reason}, json)
+    except EPError as exc:
+        _error(str(exc), json)
+        raise typer.Exit(1)
+
+
 # ---------------------------------------------------------------------------
 # MCP server
 # ---------------------------------------------------------------------------
