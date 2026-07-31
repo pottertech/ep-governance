@@ -8,10 +8,10 @@
 
 | Component | Host | Notes |
 |-----------|------|-------|
-| EP Service | Mac | Runs `ep-governance serve`, holds Ed25519 signing key, writes audit events. |
-| Governed Proxy | NAS (Docker) | Separate process/container with target credentials; verifies tokens, executes actions. |
-| Agents | Mac + cloudhub | Submit proposals via `ep_execute`; have no target credentials. |
-| Database | NAS (PostgreSQL via Docker) | Shared by EP service and proxy. SQLite acceptable for dev only. |
+| EP Service | EP host | Runs `ep-governance serve`, holds Ed25519 signing key, writes audit events. |
+| Governed Proxy | Proxy host (Docker) | Separate process/container with target credentials; verifies tokens, executes actions. |
+| Agents | Agent hosts | Submit proposals via `ep_execute`; have no target credentials. |
+| Database | Database host (PostgreSQL) | Shared by EP service and proxy. SQLite acceptable for dev only. |
 
 ## Transition Stage Reference
 
@@ -41,13 +41,13 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 ## RB-01: Authorization Stuck in `executing`
 
 ### Symptoms
-- A transition has been in the `executing` stage longer than the proxy timeout window (`PROXY_TIMEOUT_SECONDS`, default 30 s).
+- A transition has been in the `executing` stage longer than the proxy timeout window (default 30 seconds, controlled by `ProxyConfig.timeout_seconds`).
 - `ep-governance status --transition <id>` shows `stage=executing` with no result fields populated.
 - The agent that submitted the action is blocked waiting for a result.
 - The authorization token for this transition shows `used=TRUE` in the database.
 
 ### Diagnosis
-1. Check whether the proxy process is still running on the NAS:
+1. Check whether the proxy process is still running on the proxy host:
    ```bash
    docker ps | grep ep-governance-proxy
    ```
@@ -76,10 +76,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    ```
 3. If the transition has been stuck for more than a few minutes and the proxy is not going to report a result, manually advance it to `execution_uncertain` by calling `record_result` with `exit_status="timeout"`:
    ```python
-   engine.record_result(
-       transition_id="<transition_id>",
-       exit_status="timeout",
-       result_summary="Manual escalation: proxy did not report result (stuck executing)",
+   ep-governance mark-uncertain --transition <TRANSITION_ID> --reason "Operator intervention"",
    )
    ```
    This sets `requires_manual_reconciliation=TRUE` and moves the stage to `execution_uncertain`.
@@ -92,8 +89,8 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 
 ### Prevention
 - Monitor proxy health with a liveness check; alert if the proxy container is unhealthy or restarted frequently.
-- Set up a periodic job that scans for transitions in `executing` longer than `PROXY_TIMEOUT_SECONDS + 60s` and alerts operators.
-- Ensure the NAS has adequate resources (CPU, memory) for the proxy container.
+- Set up a periodic job that scans for transitions in `executing` longer than 90 seconds (30s default timeout + 60s grace) and alerts operators.
+- Ensure the proxy host has adequate resources (CPU, memory) for the proxy container.
 
 ---
 
@@ -124,10 +121,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 1. **Determine the true outcome:** did the action succeed or fail on the target system?
 2. **Reconcile as succeeded** (only if the action truly completed and the target state is correct):
    ```python
-   engine.reconcile(
-       transition_id="<transition_id>",
-       final_status="succeeded",
-       result_summary="Reconciled: confirmed action completed on target (ref: <attempt_id>)",
+   ep-governance reconcile --transition <TRANSITION_ID> --outcome succeeded --reason "Operator confirmed" --branch <BRANCH_ID>",
        branch_committer=branch_committer,  # REQUIRED for succeeded
        lattice_id="<lattice_id>",
    )
@@ -135,10 +129,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    The `branch_committer` must be provided — successful reconciliation atomically creates a graph node and advances the branch head. Without it, the call raises `IllegalTransitionError`.
 3. **Reconcile as failed** (if the action did not complete or the target is in an inconsistent state):
    ```python
-   engine.reconcile(
-       transition_id="<transition_id>",
-       final_status="failed",
-       result_summary="Reconciled: action did not complete on target (ref: <attempt_id>)",
+   ep-governance reconcile --transition <TRANSITION_ID> --outcome succeeded --reason "Operator confirmed" --branch <BRANCH_ID>",
    )
    ```
    No graph node is created. The transition advances to `failed`.
@@ -149,7 +140,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 - If reconcile-as-succeeded fails because branch commitment fails again, the transition stays at `execution_uncertain` with `requires_manual_reconciliation=TRUE`. Retry after resolving the branch conflict.
 
 ### Prevention
-- Ensure network reliability between the proxy (NAS) and EP service (Mac).
+- Ensure network reliability between the proxy (proxy host) and EP service (Mac).
 - Monitor for `transition.execution_uncertain` audit events and alert immediately.
 - Keep the reconciliation queue empty — every uncertain transition is a governance gap.
 
@@ -159,42 +150,42 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 
 ### Symptoms
 - Agents receive connection errors or timeouts when calling `ep_execute`.
-- The proxy container on the NAS is not responding to health checks.
+- The proxy container on the proxy host is not responding to health checks.
 - `docker ps` shows the proxy container as `Exited`, `Restarting`, or not listed at all.
 - Transitions are stuck in `authorized` (never advancing to `executing`).
 
 ### Diagnosis
-1. Check container status on the NAS:
+1. Check container status on the proxy host:
    ```bash
-   ssh nas docker ps -a | grep ep-governance-proxy
+   docker ps -a | grep ep-governance-proxy
    ```
 2. If the container is running, check health:
    ```bash
-   ssh nas docker inspect --format='{{.State.Health.Status}}' ep-governance-proxy
+   docker inspect --format='{{.State.Health.Status}}' ep-governance-proxy
    ```
 3. Check container logs for crash reasons:
    ```bash
-   ssh nas docker logs --tail 200 ep-governance-proxy
+   docker logs --tail 200 ep-governance-proxy
    ```
-4. Verify network connectivity from the Mac (EP service) to the NAS proxy port:
+4. Verify network connectivity from the EP service host (EP service) to the proxy host proxy port:
    ```bash
    nc -zv <nas-ip> <proxy-port>
    ```
-5. Check the NAS Docker daemon:
+5. Check the proxy host Docker daemon:
    ```bash
-   ssh nas docker info
+   docker info
    ```
 6. Verify the database is reachable from the proxy container (see RB-04 if the DB is also down).
 
 ### Immediate Action
 1. If the container is stopped, start it:
    ```bash
-   ssh nas docker start ep-governance-proxy
+   docker start ep-governance-proxy
    ```
 2. If the container is in a crash loop, inspect the logs for the root cause (missing config, DB connection failure, invalid key file). Fix the underlying issue before restarting.
-3. If the container is healthy but unreachable from the Mac, check:
-   - NAS firewall rules.
-   - Tailscale/network connectivity between Mac and NAS.
+3. If the container is healthy but unreachable from the EP service host, check:
+   - proxy host firewall rules.
+   - Tailscale/network connectivity between EP service host and proxy host.
    - Docker port mappings (`docker port ep-governance-proxy`).
 4. If the proxy cannot be revived quickly, transitions in `authorized` will remain there. They are not lost — once the proxy is back, agents can retry `ep_execute` with the same authorization token (if it has not expired, TTL default 5 min). If tokens have expired, agents must re-propose.
 
@@ -207,7 +198,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 - Run the proxy under Docker with `--restart unless-stopped` or equivalent.
 - Implement a health check endpoint in the proxy and configure Docker `HEALTHCHECK`.
 - Alert on any transition in `authorized` for more than 10 minutes (likely indicates proxy is down).
-- Keep a runbook for NAS maintenance windows so operators can gracefully drain the proxy before planned downtime.
+- Keep a runbook for proxy host maintenance windows so operators can gracefully drain the proxy before planned downtime.
 
 ---
 
@@ -220,9 +211,9 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 - Audit events cannot be written; transitions cannot change stage.
 
 ### Diagnosis
-1. Check PostgreSQL container on the NAS:
+1. Check PostgreSQL container on the proxy host:
    ```bash
-   ssh nas docker ps | grep postgres
+   docker ps | grep postgres
    ```
 2. Attempt a direct connection:
    ```bash
@@ -230,21 +221,21 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    ```
 3. Check PostgreSQL logs:
    ```bash
-   ssh nas docker logs --tail 100 ep-governance-postgres
+   docker logs --tail 100 ep-governance-postgres
    ```
-4. Check disk space on the NAS (PostgreSQL will refuse connections if the WAL volume is full):
+4. Check disk space on the proxy host (PostgreSQL will refuse connections if the WAL volume is full):
    ```bash
-   ssh nas df -h
+   df -h
    ```
-5. Check NAS system resources (memory, CPU):
+5. Check proxy host system resources (memory, CPU):
    ```bash
-   ssh nas free -h && ssh nas top -bn1 | head -5
+   free -h && ssh proxy-host top -bn1 | head -5
    ```
 
 ### Immediate Action
 1. If PostgreSQL is stopped, restart it:
    ```bash
-   ssh nas docker restart ep-governance-postgres
+   docker restart ep-governance-postgres
    ```
    Wait for it to accept connections before restarting the EP service and proxy.
 2. If disk is full, free space (trim WAL, remove old logs, vacuum) and restart PostgreSQL.
@@ -256,7 +247,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    # 1. Verify DB
    psql -h <nas-ip> -U ep_governance -d ep_governance -c "SELECT 1;"
    # 2. Restart proxy
-   ssh nas docker restart ep-governance-proxy
+   docker restart ep-governance-proxy
    # 3. Restart EP service
    # (depends on your launch method — launchctl, systemd, etc.)
    ```
@@ -275,7 +266,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 ### Prevention
 - Use Docker `--restart unless-stopped` for the PostgreSQL container.
 - Configure WAL archiving and point-in-time recovery.
-- Monitor disk usage on the NAS — alert at 80%.
+- Monitor disk usage on the proxy host — alert at 80%.
 - Run periodic `ep-governance audit verify` checks as a health probe.
 
 ---
@@ -306,9 +297,9 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 1. **Treat this as a potential security incident.** A broken audit chain may indicate tampering, database corruption, or a bug in the audit writer.
 2. **Quarantine the database.** Stop the EP service and proxy to prevent further writes:
    ```bash
-   # Stop EP service on Mac
-   # Stop proxy on NAS
-   ssh nas docker stop ep-governance-proxy
+   # Stop EP service on EP service host
+   # Stop proxy on the proxy host
+   docker stop ep-governance-proxy
    ```
 3. **Export the current audit table** for forensic analysis:
    ```sql
@@ -422,12 +413,12 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 ### Immediate Action
 1. **If the transition is still in `authorized`:** The transition can be expired to clean up:
    ```python
-   engine.advance_stage(transition_id, "expired")
+   ep-governance mark-uncertain --transition <TRANSITION_ID> --reason "Operator advancing stale transition"
    ```
    This is a legal transition: `authorized → expired`.
 2. **If the transition is in `pending_approval`:** Similarly, it can be expired:
    ```python
-   engine.advance_stage(transition_id, "expired")
+   ep-governance mark-uncertain --transition <TRANSITION_ID> --reason "Operator advancing stale transition"
    ```
    Legal transition: `pending_approval → expired`.
 3. **The agent must re-propose** the action with a new idempotency key. The old transition is terminal (`expired`) and cannot be re-authorized.
@@ -480,7 +471,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    ```
    Restart the proxy after updating:
    ```bash
-   ssh nas docker restart ep-governance-proxy
+   docker restart ep-governance-proxy
    ```
 3. **Old tokens remain verifiable during the transition window** if the proxy still has the old public key. However, if the old key is completely lost, old unclaimed tokens cannot be verified and are effectively dead. Agents holding expired or unclaimable tokens must re-propose.
 4. **Restart the EP service** so it loads the new signing key.
@@ -538,12 +529,12 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    ```python
    for tid in compromised_transition_ids:
        if stage in ("proposed", "pending_approval", "authorized"):
-           engine.cancel(tid, agent_id="operator_principal_id")
+           ep-governance cancel --transition <TRANSITION_ID>
    ```
 3. **Expire any authorized-but-unclaimed tokens** for the agent to prevent proxy execution:
    ```python
    for tid in authorized_transition_ids:
-       engine.advance_stage(tid, "expired")
+       ep-governance mark-uncertain --transition <TRANSITION_ID> --reason "Operator advancing stale transition"
    ```
 4. **Do NOT cancel or expire transitions in `executing`** — these may have already been claimed by the proxy and the action may be in progress. Instead, monitor them and reconcile once complete (see RB-02).
 5. **Review all executed actions** by the compromised agent. If any caused harmful side effects on target systems, initiate remediation on those systems directly (rollback database changes, stop containers, etc.).
@@ -573,12 +564,12 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 - The proxy's credentials (target system credentials: database password, SSH key, API token) are suspected or confirmed compromised.
 - The proxy's own identity (used to authenticate to EP) may also be compromised.
 - Unauthorized actions may have been executed on target systems using the proxy's credentials.
-- The proxy container on the NAS may have been accessed by an unauthorized party.
+- The proxy container on the proxy host may have been accessed by an unauthorized party.
 
 ### Diagnosis
 1. Review proxy access logs and Docker container logs for unusual activity:
    ```bash
-   ssh nas docker logs --since 24h ep-governance-proxy
+   docker logs --since 24h ep-governance-proxy
    ```
 2. Check all transitions that were executed through the proxy in the suspected compromise window:
    ```sql
@@ -589,12 +580,12 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    ORDER BY t.updated_at;
    ```
 3. Check the target systems for unauthorized changes (unexpected database modifications, new containers, SSH login logs).
-4. Review NAS access logs for unauthorized SSH or Docker API access.
+4. Review proxy host access logs for unauthorized SSH or Docker API access.
 
 ### Immediate Action
 1. **Stop the proxy container immediately** to prevent further unauthorized executions:
    ```bash
-   ssh nas docker stop ep-governance-proxy
+   docker stop ep-governance-proxy
    ```
 2. **Rotate all target credentials** that the proxy had access to:
    - Database passwords: change the PostgreSQL user password.
@@ -606,21 +597,21 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 5. **Review all transitions in `executing` or `execution_uncertain`** from the compromise window — these may have been executed by the attacker. Manually verify each one against the target system.
 6. **Deploy a clean proxy container** with the new credentials:
    ```bash
-   ssh nas docker run -d --name ep-governance-proxy --restart unless-stopped \
+   docker run -d --name ep-governance-proxy --restart unless-stopped \
      -v /path/to/new/config:/config \
      ep-governance-proxy:latest
    ```
 7. **Verify the new proxy is healthy** before allowing agents to resume execution.
 
 ### Follow-up
-- Conduct a full security incident investigation. Determine how the proxy credentials were compromised (NAS breach, Docker daemon compromise, configuration leak).
-- Review NAS security posture — SSH access controls, Docker socket permissions, firewall rules.
+- Conduct a full security incident investigation. Determine how the proxy credentials were compromised (proxy host breach, Docker daemon compromise, configuration leak).
+- Review proxy host security posture — SSH access controls, Docker socket permissions, firewall rules.
 - Audit all target systems for persistent backdoors or unauthorized changes.
 - File an incident report.
 
 ### Prevention
 - Store proxy credentials in a secrets manager (Vault, Docker secrets) — never in environment variables or config files in plaintext.
-- Restrict NAS SSH access to specific keys and IP ranges.
+- Restrict proxy host SSH access to specific keys and IP ranges.
 - Run the proxy container with minimal privileges (no Docker socket mount, read-only filesystem where possible).
 - Monitor proxy container for unauthorized configuration changes.
 - Rotate proxy credentials regularly (monthly or quarterly).
@@ -660,10 +651,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 1. **Confirm the action succeeded on the target system** (same as RB-02 diagnosis).
 2. **Reconcile with updated branch head expectations.** Use the `reconcile` method with the current branch head as the expected head:
    ```python
-   engine.reconcile(
-       transition_id="<transition_id>",
-       final_status="succeeded",
-       result_summary="Reconciled after branch-head conflict (ref: <attempt_id>)",
+   ep-governance reconcile --transition <TRANSITION_ID> --outcome succeeded --reason "Operator confirmed" --branch <BRANCH_ID>",
        branch_committer=branch_committer,
        expected_head_id="<current_head_node_id>",  # use current, not original
        expected_version=<current_version>,
@@ -704,14 +692,14 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 3. Check whether the failure was partial — some DDL may have succeeded before the error, leaving the schema inconsistent.
 4. Check PostgreSQL logs for constraint violations or syntax errors during migration:
    ```bash
-   ssh nas docker logs --tail 50 ep-governance-postgres
+   docker logs --tail 50 ep-governance-postgres
    ```
 
 ### Immediate Action
 1. **Stop the EP service and proxy** to prevent further operations against a partially migrated database:
    ```bash
-   ssh nas docker stop ep-governance-proxy
-   # Stop EP service on Mac
+   docker stop ep-governance-proxy
+   # Stop EP service on EP service host
    ```
 2. **Assess the damage.** Determine which migrations succeeded and which failed:
    ```sql
@@ -759,29 +747,29 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 ## RB-13: Network Partition
 
 ### Symptoms
-- The EP service (Mac) cannot reach the proxy (NAS) or the database (NAS).
-- The proxy (NAS) cannot reach the EP service (Mac) to report results.
-- Agents (Mac, cloudhub) cannot reach the EP service to propose or execute.
+- The EP service (Mac) cannot reach the proxy (proxy host) or the database (proxy host).
+- The proxy (proxy host) cannot reach the EP service (Mac) to report results.
+- Agents (EP service host, agent host) cannot reach the EP service to propose or execute.
 - Operations fail with connection timeouts or `OperationalError`.
 - Some components are functioning normally while others are isolated.
 
 ### Diagnosis
 1. Test connectivity from each component to every other component:
    ```bash
-   # Mac → NAS (proxy)
+   # EP service host → proxy host (proxy)
    nc -zv <nas-ip> <proxy-port>
-   # Mac → NAS (database)
+   # EP service host → proxy host (database)
    nc -zv <nas-ip> 5432
-   # NAS → Mac (EP service)
-   ssh nas nc -zv <mac-ip> <ep-service-port>
-   # cloudhub → Mac (EP service)
-   ssh cloudhub nc -zv <mac-ip> <ep-service-port>
+   # proxy host → EP service host (EP service)
+   ssh proxy-host nc -zv <mac-ip> <ep-service-port>
+   # agent host → EP service host (EP service)
+   ssh agent host nc -zv <mac-ip> <ep-service-port>
    ```
 2. Check if Tailscale or the VPN is connected:
    ```bash
    tailscale status
    ```
-3. Check for asymmetric partitions — the Mac might reach the NAS but not vice versa.
+3. Check for asymmetric partitions — the EP service host might reach the proxy host but not vice versa.
 4. Check for DNS resolution failures if hostnames are used.
 5. Determine the partition scope: is it a single host down, a network segment isolated, or a broader outage?
 
@@ -791,9 +779,9 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    - If a switch or router is down: escalate to network operations.
    - If a host is down: see RB-03 (proxy) or RB-04 (database).
 2. **During the partition, the system degrades as follows:**
-   - **Mac ↔ NAS partition:** EP service cannot write audit events or transitions. Proxy cannot report results. Transitions in `executing` will eventually become `execution_uncertain` (see RB-02). No new proposals can be made.
-   - **cloudhub ↔ Mac partition:** Cloudhub agents cannot propose or execute. Mac agents continue normally. No impact on governance state.
-   - **NAS internal (proxy ↔ database):** Proxy cannot claim authorizations or record results. Transitions stay in `authorized`. See RB-03 and RB-04.
+   - **EP service host ↔ proxy host partition:** EP service cannot write audit events or transitions. Proxy cannot report results. Transitions in `executing` will eventually become `execution_uncertain` (see RB-02). No new proposals can be made.
+   - **agent host ↔ EP service host partition:** Cloudhub agents cannot propose or execute. EP service host agents continue normally. No impact on governance state.
+   - **proxy host internal (proxy ↔ database):** Proxy cannot claim authorizations or record results. Transitions stay in `authorized`. See RB-03 and RB-04.
 3. **Do NOT attempt to force operations during a partition.** Writing to a disconnected component may cause split-brain or data loss.
 4. **Once connectivity is restored:**
    - Restart the EP service and proxy to re-establish connections.
@@ -811,7 +799,7 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 - Test the recovery procedure after a simulated partition.
 
 ### Prevention
-- Use Tailscale or a mesh VPN for resilient connectivity between Mac, NAS, and cloudhub.
+- Use Tailscale or a mesh VPN for resilient connectivity between EP service host, proxy host, and agent host.
 - Configure DNS with short TTLs and multiple resolvers.
 - Implement health checks between all components and alert on failures within 60 seconds.
 - Have a documented escalation path for network issues.
@@ -838,18 +826,18 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 ### Immediate Action
 1. **Stop the governed proxy first** — this is the single most critical step. The proxy is the only path to target system execution. Stopping it immediately prevents all consequential actions:
    ```bash
-   ssh nas docker stop ep-governance-proxy
+   docker stop ep-governance-proxy
    ```
 2. **Stop the EP service** to prevent new authorizations from being issued:
    ```bash
-   # On Mac — depends on launch method:
+   # On EP service host — depends on launch method:
    # launchctl: launchctl stop com.ep-governance.service
    # systemd:  systemctl stop ep-governance
    # manual:   kill <ep-service-pid>
    ```
 3. **Stop or suspend agents** to prevent them from retrying `ep_execute` calls:
-   - Mac agents: stop the agent processes.
-   - Cloudhub agents: `ssh cloudhub '<stop-command>'`
+   - EP service host agents: stop the agent processes.
+   - Cloudhub agents: `ssh agent host '<stop-command>'`
 4. **Record the shutdown time** — all transitions in non-terminal stages will remain in their current state. This is correct and expected; they will be reconciled during recovery.
 5. **Do NOT modify the database directly** during shutdown. The audit chain and transition state must be preserved for investigation.
 6. **Take a database backup** for forensic analysis (if the database is still accessible):
