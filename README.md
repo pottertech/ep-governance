@@ -7,8 +7,8 @@ A binding governance system for AI agents. It maintains a persistent directed ac
 Enforced mode verified (July 30, 2026). Full pipeline tested:
 propose, policy evaluation, Ed25519 token issuance, governed proxy execution,
 graph node creation, branch head advancement. Token reuse and payload tampering
-rejected. 962 tests pass (SQLite suite), 10 PostgreSQL integration tests
-require `EP_TEST_DB_URL`, 4 end-to-end enforced mode tests pass.
+rejected. 973 tests collected: 962 passed, 1 skipped, 10 errors (PG integration
+tests require `EP_TEST_DB_URL`). 4 end-to-end enforced mode tests pass.
 
 ## Governing Documents
 
@@ -87,8 +87,9 @@ Without these deployment measures, EP-Governance operates in advisory mode regar
 | Python | 3.12+ |
 | PostgreSQL | 17 (Docker container for PG integration tests) |
 | SQLite | Built-in (default for unit/property/contract tests) |
-| Total tests collected | 973 (962 passed, 1 skipped, 10 require PG) |
-| PG integration tests | 10 (require `EP_TEST_DB_URL` — run separately) |
+| Total tests collected | 973 |
+| Test results (without PG) | 962 passed, 1 skipped, 10 errors |
+| PG integration tests | 10 (error without `EP_TEST_DB_URL`; pass with it set) |
 | E2e tests | 4 (standalone scripts, run against live PostgreSQL) |
 | Test categories | unit (414), property (38), contract (298), integration (154), security (65), concurrency (4) |
 | Duration | ~29 seconds (SQLite), ~55 seconds (with PG integration) |

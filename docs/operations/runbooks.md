@@ -465,22 +465,37 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    PY
    ```
    Ensure the file is written with mode `0600` (`save_private_key` does this automatically). Copy the printed `EP_PUBLIC_KEY=` value — you will need it for the proxy.
-2. **Update the proxy's public key.** Set `EP_PUBLIC_KEY` in the proxy's environment to the value printed above, then restart the proxy:
+
+**Key rotation uses an immediate cutover model.** The proxy accepts a single public key. When you replace it, the proxy can no longer verify tokens signed by the old key. Therefore you must follow this exact sequence to avoid a window where the service signs with one key while the proxy verifies with another.
+
+### Maintenance Sequence
+
+1. **Stop new authorization issuance.** Pause or stop the EP service so no new tokens are signed with the old key.
+2. **Wait for outstanding tokens to expire.** The default token TTL is 5 minutes (`EP_TOKEN_TTL_SECONDS=300`). Wait at least this long, or explicitly expire outstanding authorizations:
+   ```bash
+   # For each transition still in 'authorized' stage:
+   ep-governance expire --transition <TRANSITION_ID> --reason "Key rotation — expiring outstanding authorizations"
+   ```
+3. **Stop the EP service** if not already stopped.
+4. **Install the new private key** (generated above) on the EP service host.
+5. **Set the new public key on the proxy.** Update `EP_PUBLIC_KEY` in the proxy's environment to the value printed in step 1:
    ```bash
    # Update EP_PUBLIC_KEY in the proxy's .env file or secret manager
+   ```
+6. **Restart the proxy:**
+   ```bash
    docker restart ep-governance-proxy
    ```
-3. **Old tokens remain verifiable during the transition window** if the proxy still has the old public key. However, if the old key is completely lost, old unclaimed tokens cannot be verified and are effectively dead. Agents holding expired or unclaimable tokens must re-propose.
-4. **Restart the EP service** so it loads the new signing key.
-5. **Expire any orphaned authorizations** that were signed with the old key and cannot be verified:
-   ```sql
-   UPDATE ep_transitions SET stage = 'expired'
-   WHERE stage = 'authorized' AND id IN (
-       SELECT transition_id FROM ep_authorizations
-       WHERE used = FALSE
-   );
+7. **Restart the EP service** so it loads the new signing key.
+8. **Verify the rotation** by running a governed test action:
+   ```bash
+   # Propose and execute a test SELECT through the full pipeline
+   ep-governance check --tool postgres.execute --arguments '{"sql": "SELECT 1"}' --branch <BRANCH_ID> --agent <AGENT_ID> --json
    ```
-   (Use the transition engine's `advance_stage` for proper audit logging rather than direct SQL.)
+   Then issue a token and send it to the proxy. Confirm:
+   - Token is accepted (new key works)
+   - Token reuse is rejected (single-use enforced)
+   - Audit chain is valid: `ep-governance audit verify --lattice <LATTICE_ID>`
 
 ### Follow-up
 - **Back up the new signing key** to a secure, off-host location (e.g., encrypted backup, hardware security module, or a secrets manager like HashiCorp Vault).
@@ -529,7 +544,11 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
    ```
    Repeat for each affected transition ID.
 3. **Investigate transitions in `executing` separately** — these may have been claimed by the proxy and the action may be in progress. Monitor them and reconcile once complete (see RB-02).
-4. **Handle `proposed` transitions** according to the supported cancellation or rejection procedure. Do not use `expire` for transitions in `proposed` or `executing` stage.
+4. **Handle `proposed` transitions** using the cancel CLI command. Transitions in `proposed` stage have not been authorized and should be cancelled, not expired:
+   ```bash
+   ep-governance cancel --transition <TRANSITION_ID> --agent <AGENT_ID>
+   ```
+   Do not use `expire` for transitions in `proposed` or `executing` stage.
 5. **Review all executed actions** by the compromised agent. If any caused harmful side effects on target systems, initiate remediation on those systems directly (rollback database changes, stop containers, etc.).
 6. **Verify audit chain integrity** to ensure the attacker did not tamper with the audit log:
    ```bash

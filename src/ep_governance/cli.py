@@ -1069,6 +1069,31 @@ def expire(
         raise typer.Exit(1)
 
 
+@app.command()
+def cancel(
+    transition: str = typer.Option(..., "--transition", help="Transition XID to cancel."),
+    agent: str = typer.Option(..., "--agent", help="Agent principal XID requesting cancellation."),
+    json: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """Cancel a transition that has not yet started executing.
+
+    Use for transitions in 'proposed', 'pending_approval', or 'authorized'
+    stage that should be withdrawn. This moves the transition to the
+    'cancelled' terminal state with an audit event.
+    """
+    try:
+        conn = _get_conn()
+        ep_id = _ensure_ep_service_principal(conn)
+        trans_engine = TransitionEngine(conn.engine, ep_id)
+        result = trans_engine.cancel(transition, agent)
+        conn.commit()
+        conn.close()
+        _output({"transition_id": transition, "stage": result["stage"]}, json)
+    except EPError as exc:
+        _error(str(exc), json)
+        raise typer.Exit(1)
+
+
 # ---------------------------------------------------------------------------
 # MCP server
 # ---------------------------------------------------------------------------
