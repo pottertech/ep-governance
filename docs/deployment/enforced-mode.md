@@ -25,7 +25,7 @@ This guide covers deploying EP-Governance in **enforced mode**, where the govern
  ┌──────────────┐         ┌─────────────────────┐         ┌──────────────────┐
  │  EP Service   │  token  │   Governed Proxy     │  SQL    │   Target DB       │
  │  (MCP server) │────────▶│   (Docker, port 8201)│────────▶│   (PostgreSQL)    │
- │  No DB creds  │         │   Owns DB creds      │         │   TLS enabled     │
+ │  No target DB │         │   Owns DB creds      │         │   TLS enabled     │
  └──────────────┘         └─────────────────────┘         └──────────────────┘
         │                          │
         │                          ▼

@@ -155,7 +155,7 @@ print(km.public_key.encode().hex())
 Copy the printed hex string into your `.env`:
 
 ```bash
-EP_PUBLIC_KEY=<64-byte hex public key>
+EP_PUBLIC_KEY=<32-byte Ed25519 public key encoded as 64 hexadecimal characters>
 ```
 
 > **Security:** The private key file (`ep_signing.key`) must never be shared with proxies, agents, or any process other than the EP service. Store it with restrictive file permissions (`chmod 600 ep_signing.key`) and back it up securely — if you lose it, all previously issued tokens become unverifiable.
@@ -370,7 +370,7 @@ EP_PROXY_TARGET_URL=postgresql+psycopg://ep_governance:change-me-in-production@p
 EP_PROXY_AUDIENCE=postgres-proxy
 
 # EP's Ed25519 public key (hex) — from Step 3
-EP_PUBLIC_KEY=<64-byte hex public key>
+EP_PUBLIC_KEY=<32-byte Ed25519 public key encoded as 64 hexadecimal characters>
 
 # EP service principal XID — from Step 2.3
 EP_EP_SERVICE_ID=<EP service XID>
@@ -454,9 +454,9 @@ Expected output (abbreviated):
 
 The `stage: authorized` means the policy engine matched the allow policy, the deny policy did not apply (this is a SELECT, not a DROP), and the transition was admitted. No token is issued yet — `check` is advisory.
 
-### 8.2 Execute the action (request authorization + proxy execution)
+### 8.2 Authorize the action (request authorization token)
 
-Use `ep-governance execute` to request a signed authorization token and route execution through the proxy:
+Use `ep-governance execute` to propose the action and request authorization:
 
 ```bash
 ep-governance execute \
@@ -470,10 +470,9 @@ ep-governance execute \
 This command:
 1. Proposes the transition (classifies SQL → `postgres.execute.select`)
 2. Evaluates policies (allow policy matches, deny does not → admissible)
-3. Issues an Ed25519-signed authorization token (payload-bound, agent-bound, branch-bound, proxy-bound, single-use, 5-minute TTL)
-4. Returns the transition with `stage: authorized` and the signed token
+3. Returns the transition with `stage: authorized`
 
-> **Note:** The CLI `execute` command proposes and authorizes the transition. To complete the full pipeline, the agent (or a script) must send the signed token + payload to the proxy's `/execute` endpoint. The token is included in the transition output.
+> **Important:** The CLI `execute` command proposes and authorizes the transition. It does **not** call the proxy. To complete the full pipeline, the agent (or a script) must issue a signed authorization token and send it with the payload to the proxy's `/execute` HTTP endpoint. See the next step.
 
 ### 8.3 Send the token to the proxy
 

@@ -63,6 +63,7 @@ class Config:
     token_ttl_seconds: int = 300
     dev: bool = False
     bootstrap_token_hash: str | None = None
+    signing_key_file: str | None = None
 
 
 def load_config(env: dict[str, str] | None = None) -> Config:
@@ -124,4 +125,5 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         token_ttl_seconds=token_ttl,
         dev=dev,
         bootstrap_token_hash=e.get("EP_BOOTSTRAP_TOKEN_HASH") or None,
+        signing_key_file=e.get("EP_SIGNING_KEY_FILE") or None,
     )

@@ -33,6 +33,7 @@ from .db.repositories import (
 )
 from .errors import EPError, PolicyIntegrityError
 from .transitions import TransitionEngine
+from .branches import BranchCommitter
 from .xid import XID
 
 app = typer.Typer(
@@ -953,6 +954,90 @@ def bootstrap_admin(
             },
             json,
         )
+    except EPError as exc:
+        _error(str(exc), json)
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# Transition reconciliation (operator commands)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def mark_uncertain(
+    transition: str = typer.Option(..., "--transition", help="Transition XID to mark as execution_uncertain."),
+    reason: str = typer.Option("Operator-initiated timeout", "--reason", "-r"),
+    json: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """Mark a transition as execution_uncertain (operator override).
+
+    Use when a transition is stuck in 'executing' and the proxy is
+    unreachable or has crashed. This moves the transition to
+    execution_uncertain so it can be reconciled later.
+    """
+    try:
+        conn = _get_conn()
+        ep_id = _ensure_ep_service_principal(conn)
+        trans_engine = TransitionEngine(conn.engine, ep_id)
+        result = trans_engine.record_result(transition, "timeout", reason)
+        conn.commit()
+        conn.close()
+        _output({"transition_id": transition, "stage": result["stage"], "reason": reason}, json)
+    except EPError as exc:
+        _error(str(exc), json)
+        raise typer.Exit(1)
+
+
+@app.command()
+def reconcile(
+    transition: str = typer.Option(..., "--transition", help="Transition XID to reconcile."),
+    outcome: str = typer.Option(..., "--outcome", help="Final outcome: 'succeeded' or 'failed'."),
+    reason: str = typer.Option("Operator reconciliation", "--reason", "-r"),
+    branch: str = typer.Option(None, "--branch", help="Branch XID (required for succeeded)."),
+    json: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """Reconcile a transition from execution_uncertain to a final state.
+
+    Use after investigating an execution_uncertain transition. If the
+    action actually completed, use --outcome succeeded. If it did not,
+    use --outcome failed.
+    """
+    try:
+        conn = _get_conn()
+        ep_id = _ensure_ep_service_principal(conn)
+        trans_engine = TransitionEngine(conn.engine, ep_id)
+
+        if outcome == "succeeded":
+            if not branch:
+                _error("--branch is required when --outcome succeeded", json)
+                raise typer.Exit(1)
+            branch_committer = BranchCommitter(conn.engine, ep_id)
+            # Get current branch head
+            branch_repo = BranchRepository(conn)
+            head_id, version = branch_repo.get_head(branch)
+            lattice_result = conn.execute(
+                __import__("sqlalchemy").text(
+                    "SELECT lattice_id FROM ep_branches WHERE id = :bid"
+                ),
+                {"bid": branch},
+            )
+            lattice_row = lattice_result.fetchone()
+            lattice_id = lattice_row[0] if lattice_row else branch
+            conn.commit()
+            result = trans_engine.reconcile(
+                transition, "succeeded", reason,
+                branch_committer=branch_committer,
+                expected_head_id=head_id,
+                expected_version=version,
+                lattice_id=lattice_id,
+            )
+        else:
+            result = trans_engine.reconcile(transition, "failed", reason)
+
+        conn.commit()
+        conn.close()
+        _output({"transition_id": transition, "stage": result["stage"], "outcome": outcome}, json)
     except EPError as exc:
         _error(str(exc), json)
         raise typer.Exit(1)

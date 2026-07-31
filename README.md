@@ -49,7 +49,7 @@ Where the two conflict, v1.1.1 governs.
 ## Installation
 
 ```bash
-git clone git@github.com:pottertech/ep-governance.git
+git clone https://github.com/pottertech/ep-governance.git
 cd ep-governance
 pip install -e ".[postgres,crypto,dev]"
 ep-governance init
