@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-sqlite:
+    name: Default test suite (SQLite)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[postgres,crypto,dev]"
+          pip install bandit pip-audit
+
+      - name: Run tests
+        run: pytest tests/ -q --tb=short
+
+      - name: Bandit security scan
+        run: bandit -r src/ -f json -o bandit-report.json || true
+
+      - name: Dependency audit
+        run: pip-audit || true
+
+  test-postgres:
+    name: PostgreSQL integration tests
+    runs-on: ubuntu-latest
+    needs: test-sqlite
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ep_test
+          POSTGRES_PASSWORD: ep_test_pw
+          POSTGRES_DB: ep_governance_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[postgres,crypto,dev]"
+
+      - name: Run PostgreSQL integration tests
+        env:
+          EP_TEST_DB_URL: postgresql://ep_test:ep_test_pw@localhost:5432/ep_governance_test
+        run: pytest tests/integration/test_pg_integration.py -v --tb=short
+
+  cli-smoke:
+    name: CLI smoke tests
+    runs-on: ubuntu-latest
+    needs: test-sqlite
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -e ".[postgres,crypto,dev]"
+
+      - name: Verify CLI commands exist
+        run: |
+          ep-governance --help
+          ep-governance mark-uncertain --help
+          ep-governance reconcile --help
+          ep-governance expire --help
+          ep-governance cancel --help
+          ep-governance check --help
+          ep-governance execute --help
+          ep-governance status --help
+          ep-governance audit --help
+          ep-governance serve --help
