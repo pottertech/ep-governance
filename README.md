@@ -83,15 +83,15 @@ Without these deployment measures, EP-Governance operates in advisory mode regar
 
 | Item | Value |
 |------|-------|
-| Tested commit | `3185872` (July 31, 2026) |
+| Tested commit | `4fce917` (July 31, 2026) |
 | Python | 3.12+ |
 | PostgreSQL | 17 (Docker container for PG integration tests) |
 | SQLite | Built-in (default for unit/property/contract tests) |
-| Total tests (SQLite) | 962 passed, 1 skipped, 0 failed |
+| Total tests collected | 973 (962 passed, 1 skipped, 10 require PG) |
 | PG integration tests | 10 (require `EP_TEST_DB_URL` — run separately) |
-| E2e tests | 4 (run against live NAS PostgreSQL) |
-| Test categories | unit (342), property (54), contract (127), integration (415), security (50), concurrency (4), e2e (4) |
-| Duration | ~28 seconds (SQLite), ~55 seconds (with PG integration) |
+| E2e tests | 4 (standalone scripts, run against live PostgreSQL) |
+| Test categories | unit (414), property (38), contract (298), integration (154), security (65), concurrency (4) |
+| Duration | ~29 seconds (SQLite), ~55 seconds (with PG integration) |
 | Skipped tests | PostgreSQL-only tests that require `EP_TEST_DB_URL` environment variable |
 | PG integration tests | Set `EP_TEST_DB_URL=postgresql://user:pass@host:port/db` and run `pytest tests/integration/test_pg_integration.py` |
 | CI | Not yet configured |

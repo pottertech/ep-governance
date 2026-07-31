@@ -451,14 +451,23 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 4. Check if the key file was deleted, moved, or corrupted (e.g., truncated by a disk full event).
 
 ### Immediate Action
-1. **Generate a new Ed25519 keypair:**
+1. **Generate a new Ed25519 keypair and print the public key:**
    ```bash
-   # Generate a new 32-byte Ed25519 private key
-   python3 -c "from ep_governance.authorizations import KeyManager; km = KeyManager(); km.save_private_key('/var/lib/ep-governance/ep_signing.key')"
+   python3 - <<'PY'
+   from ep_governance.authorizations import KeyManager
+
+   path = "/var/lib/ep-governance/ep_signing.key"
+   km = KeyManager()
+   km.save_private_key(path)
+
+   print("Private key saved to:", path)
+   print("EP_PUBLIC_KEY=" + km.public_key.encode().hex())
+   PY
    ```
-   Ensure the file is written with mode `0600` (`save_private_key` does this automatically).
-2. **Update the proxy's public key.** The proxy needs the new public key to verify tokens signed by the new private key. Distribute the new public key to the proxy configuration and restart the proxy:
+   Ensure the file is written with mode `0600` (`save_private_key` does this automatically). Copy the printed `EP_PUBLIC_KEY=` value — you will need it for the proxy.
+2. **Update the proxy's public key.** Set `EP_PUBLIC_KEY` in the proxy's environment to the value printed above, then restart the proxy:
    ```bash
+   # Update EP_PUBLIC_KEY in the proxy's .env file or secret manager
    docker restart ep-governance-proxy
    ```
 3. **Old tokens remain verifiable during the transition window** if the proxy still has the old public key. However, if the old key is completely lost, old unclaimed tokens cannot be verified and are effectively dead. Agents holding expired or unclaimable tokens must re-propose.
@@ -513,17 +522,14 @@ Terminal stages: `succeeded`, `failed`, `cancelled`, `expired`, `denied`.
 
 ### Immediate Action
 1. **Revoke the agent's credentials.** Update the agent registry / identity provider to disable the compromised agent. This prevents new proposals from being authenticated.
-2. **Expire all non-terminal transitions** for the compromised agent:
+2. **Expire every affected transition currently in `authorized` or `pending_approval`:**
    ```bash
-   # For transitions in authorized or pending_approval stage:
+   # For each transition in authorized or pending_approval stage:
    ep-governance expire --transition <TRANSITION_ID> --reason "Credential compromise — operator cleanup"
    ```
    Repeat for each affected transition ID.
-3. **Expire any authorized-but-unclaimed tokens** for the agent to prevent proxy execution:
-   ```bash
-   ep-governance expire --transition <TRANSITION_ID> --reason "Credential compromise — expiring unclaimed token"
-   ```
-4. **Do NOT expire transitions in `executing`** — these may have already been claimed by the proxy and the action may be in progress. Instead, monitor them and reconcile once complete (see RB-02).
+3. **Investigate transitions in `executing` separately** — these may have been claimed by the proxy and the action may be in progress. Monitor them and reconcile once complete (see RB-02).
+4. **Handle `proposed` transitions** according to the supported cancellation or rejection procedure. Do not use `expire` for transitions in `proposed` or `executing` stage.
 5. **Review all executed actions** by the compromised agent. If any caused harmful side effects on target systems, initiate remediation on those systems directly (rollback database changes, stop containers, etc.).
 6. **Verify audit chain integrity** to ensure the attacker did not tamper with the audit log:
    ```bash
