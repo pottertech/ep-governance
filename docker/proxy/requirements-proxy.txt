@@ -1,0 +1,5 @@
+sqlalchemy>=2.0
+psycopg[binary]>=3.1
+pynacl>=1.5
+sqlglot>=23.0
+pydantic>=2.0

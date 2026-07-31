@@ -1,0 +1,35 @@
+version: "3.9"
+
+services:
+  ep-proxy:
+    build:
+      context: .
+      dockerfile: docker/proxy/Dockerfile
+    container_name: ep-governance-proxy
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # Governance DB (NAS PostgreSQL)
+      EP_DB_URL: "${EP_DB_URL}"
+      EP_DB_SCHEMA: ep_governance
+      EP_MODE: enforced
+
+      # Target DB (what the proxy executes against)
+      EP_PROXY_TARGET_URL: "${EP_PROXY_TARGET_URL}"
+      EP_PROXY_AUDIENCE: postgres-proxy
+      EP_PROXY_PORT: "8201"
+
+      # EP service identity
+      EP_EP_SERVICE_ID: "${EP_EP_SERVICE_ID}"
+
+      # Ed25519 public key for token verification (NOT the private key)
+      EP_PUBLIC_KEY: "${EP_PUBLIC_KEY}"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8201/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

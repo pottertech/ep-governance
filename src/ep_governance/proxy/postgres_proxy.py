@@ -65,9 +65,11 @@ class PostgresProxy(GovernedProxy):
     def target_engine(self) -> sa.Engine:
         """Lazily create the target database engine."""
         if self._target_engine is None:
-            self._target_engine = sa.create_engine(
+            # Use our create_engine to ensure psycopg3 driver and
+            # proper URL normalization.
+            from ..db.postgres import create_engine as ep_create_engine
+            self._target_engine = ep_create_engine(
                 self.config.target_connection_string,
-                future=True,
             )
         return self._target_engine
 
