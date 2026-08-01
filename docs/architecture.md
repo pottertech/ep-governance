@@ -11,31 +11,31 @@
 ```
 ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
 │   Agent (Mary)   │     │  Agent (Brodie)  │     │  Agent (Arty)    │
-│   on Mac (local) │     │  on prod-server     │     │  on Mac (local)  │
+│   on Mac (local) │     │  on prod-server  │     │  on Mac (local)  │
 └───┬──────────┬───┘     └───┬──────────┬───┘     └───┬──────────┬───┘
-    │          │              │          │              │          │
-    │ EP CLI   │ EP MCP       │ EP CLI   │ EP MCP       │ EP CLI   │ EP MCP
-    │          │              │          │              │          │
-    └──────────┴──────┬───────┴──────────┴──────┬───────┴──────────┘
+    │          │             │          │             │          │
+    │ EP CLI   │ EP MCP      │ EP CLI   │ EP MCP      │ EP CLI   │ EP MCP
+    │          │             │          │             │          │
+    └──────────┴─────┬─-─────┴──────────┴──────┬──────┴──────────┘
                      │                         │
-             ┌───────┴─────────┐               │
-             │  EP Service     │               │
-             │  (Python)       │               │
-             │  - Policy eval  │               │
-             │  - Token signing│               │
-             │  - Audit writing │               │
+             ┌───────┴────────-─┐              │
+             │  EP Service      │              │
+             │  (Python)        │              │
+             │  - Policy eval   │              │
+             │  - Token signing │              │
+             │  - Audit writing │              │
              │  - DAG operations│              │
-             └───┬──────┬───┬──┘               │
-                 │      │   │                   │
-         ┌───────┘      │   └───────┐    ┌──────┴──────────┐
-         │              │           │    │  Governed Proxy  │
-         ▼              ▼           ▼    │  (separate proc) │
-    ┌─────────┐   ┌──────────┐  ┌──────┐│  - Holds creds    │
-    │Database  │   │Notificat.│  │Embed.││  - shell/db/email │
-    │(Postgres │   │(PG LISTEN│  │(Oll. ││  - deploy/git     │
-    │ or SQLite│   │/NOTIFY or│  │OpenAI││  - Validates token│
-    │ dev-only)│   │  NATS)   │  │/none)││  - Executes action │
-    └─────────┘   └──────────┘  └──────┘└───────────────────┘
+             └───┬──────┬───┬─-─┘              │
+                 │      │   │                  │
+         ┌───────┘      │   └───────┐    ┌─────┴─--──────--───┐
+         │              │           │    │  Governed Proxy    │
+         ▼              ▼           ▼    │  (separate proc)   │
+   ┌─-────────┐   ┌──────────┐  ┌──────┐ │  - Holds creds     │
+   │Database  │   │Notificat.│  │Embed.│ │  - shell/db/email  │
+   │(Postgres │   │(PG LISTEN│  │(Oll. │ │  - deploy/git      │
+   │ or SQLite│   │/NOTIFY or│  │OpenAI│ │  - Validates token │
+   │ dev-only)│   │  NATS)   │  │/none)│ │  - Executes action │
+   └─-────────┘   └──────────┘  └──────┘ └──────────-─────────┘
 ```
 
 ### Data Flow (Enforced Mode)
