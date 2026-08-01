@@ -1072,10 +1072,14 @@ def expire(
 @app.command()
 def cancel(
     transition: str = typer.Option(..., "--transition", help="Transition XID to cancel."),
-    agent: str = typer.Option(..., "--agent", help="Agent principal XID requesting cancellation."),
     json: bool = typer.Option(False, "--json", help="Output as JSON."),
 ) -> None:
     """Cancel a transition that has not yet started executing.
+
+    This is an operator-only administrative command. It uses the EP service
+    principal identity, which has administrator privileges. Agents cannot
+    invoke this command directly — they must request cancellation through
+    the MCP server, which derives identity from the authenticated session.
 
     Use for transitions in 'proposed', 'pending_approval', or 'authorized'
     stage that should be withdrawn. This moves the transition to the
@@ -1085,10 +1089,15 @@ def cancel(
         conn = _get_conn()
         ep_id = _ensure_ep_service_principal(conn)
         trans_engine = TransitionEngine(conn.engine, ep_id)
-        result = trans_engine.cancel(transition, agent)
+        # The EP service principal acts as the administrator for CLI operations.
+        # The --agent parameter is NOT accepted from the caller to prevent
+        # identity spoofing. The service principal's identity is trusted
+        # because it is derived from the EP_DB_URL credentials, not from
+        # a command-line argument.
+        result = trans_engine.cancel(transition, ep_id)
         conn.commit()
         conn.close()
-        _output({"transition_id": transition, "stage": result["stage"]}, json)
+        _output({"transition_id": transition, "stage": result["stage"], "cancelled_by": "ep_service"}, json)
     except EPError as exc:
         _error(str(exc), json)
         raise typer.Exit(1)

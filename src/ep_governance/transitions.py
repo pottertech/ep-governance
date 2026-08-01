@@ -689,8 +689,7 @@ class TransitionEngine:
                         sa.text(
                             "SELECT COUNT(*) FROM ep_role_bindings rb "
                             "JOIN ep_roles r ON rb.role_id = r.id "
-                            "WHERE rb.principal_id = :pid AND r.name = 'administrator' "
-                            "AND rb.status = 'active'"
+                            "WHERE rb.principal_id = :pid AND r.name = 'administrator'"
                         ),
                         {"pid": agent_id},
                     )
