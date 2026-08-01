@@ -7,7 +7,7 @@ A binding governance system for AI agents. It maintains a persistent directed ac
 Enforced mode verified (July 30, 2026). Full pipeline tested:
 propose, policy evaluation, Ed25519 token issuance, governed proxy execution,
 graph node creation, branch head advancement. Token reuse and payload tampering
-rejected. 980 tests collected: 969 passed, 11 skipped (10 require `EP_TEST_DB_URL`,
+rejected. 984 tests collected: 973 passed, 11 skipped (10 require `EP_TEST_DB_URL`,
 1 requires PostgreSQL). 4 end-to-end enforced mode tests pass.
 
 ## Governing Documents
@@ -83,16 +83,16 @@ Without these deployment measures, EP-Governance operates in advisory mode regar
 
 | Item | Value |
 |------|-------|
-| Tested commit | `626fd36` (July 31, 2026) |
+| Tested commit | `85056c4` (July 31, 2026) |
 | Python | 3.12+ |
 | PostgreSQL | 17 (Docker container for PG integration tests) |
 | SQLite | Built-in (default for unit/property/contract tests) |
-| Total tests collected | 980 |
-| Test results (without PG) | 969 passed, 11 skipped |
+| Total tests collected | 984 |
+| Test results (without PG) | 973 passed, 11 skipped |
 | PG integration tests | 10 (skipped without `EP_TEST_DB_URL`; pass with it set) |
 | 11th skip | `test_pg_migration_uses_transactional_ddl` (requires PostgreSQL, not just `EP_TEST_DB_URL`) |
 | E2e tests | 4 (standalone scripts, run against live PostgreSQL) |
-| Test categories | unit (414), property (38), contract (298), integration (154), security (72), concurrency (4) |
+| Test categories | unit (414), property (38), contract (298), integration (154), security (76), concurrency (4) |
 | Duration | ~29 seconds (SQLite), ~55 seconds (with PG integration) |
 | Skipped tests | PostgreSQL-only tests that require `EP_TEST_DB_URL` environment variable |
 | PG integration tests | Set `EP_TEST_DB_URL=postgresql://user:pass@host:port/db` and run `pytest tests/integration/test_pg_integration.py` |
