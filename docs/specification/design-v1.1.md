@@ -53,29 +53,29 @@ The engineering implementation is a DAG with policies, resources, and transition
 ### 2.1 High-Level Design
 
 ```
-+-------------------+     +-------------------+     +-------------------+
++-------------------+     +-------------------+     +------------------+
 |   Agent (Mary)    |     |  Agent (Brodie)   |     |  Agent (Arty)    |
 |  on Mac (local)   |     |  on cloudhub      |     |  on Mac (local)  |
 +---+----------+----+     +---+----------+----+     +---+----------+---+
     |          |              |          |              |          |
     | EP CLI   | EP MCP       | EP CLI   | EP MCP       | EP CLI   | EP MCP
     |          |              |          |              |          |
-    +----------+---------+----+----------+---------+----+----------+
-                       |                          |
-               +-------+----------+               |
-               |  Governed Proxy  |               |
+    +----------+-------+------+----------+---------+----+----------+
+                       |                           |
+               +-------+-----------+               |
+               |  Governed Proxy   |               |
                |  (holds creds)    |               |
                |  shell/db/email/  |               |
-               |  deploy wrappers   |               |
+               |  deploy wrappers  |               |
                +---+---------+-----+               |
                    |         |                     |
-           +-------+--+   +-+-------+    +--------+--------+
-           | Database |   | Embeds  |    | Notifications   |
-           | (Postgres|   | (Ollama/|    | (PG LISTEN/NOTIFY|
-           | or SQLite)|   | OpenAI/ |    | or NATS)        |
-           +----------+   | Cohere/ |    +-----------------+
-                          | SST/none)|
-                          +---------+
+           +-------+---+   +-+--------+    +--------+---------+
+           | Database  |   | Embeds   |    | Notifications    |
+           | (Postgres |   | (Ollama/ |    | (PG LISTEN/NOTIFY|
+           | or SQLite)|   | OpenAI/  |    | or NATS)         |
+           +-----------+   | Cohere/  |    +------------------+
+                           | SST/none)|
+                           +----------+
 ```
 
 ### 2.2 Core Principles
