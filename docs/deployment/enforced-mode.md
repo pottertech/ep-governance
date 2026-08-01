@@ -22,18 +22,18 @@ This guide covers deploying EP-Governance in **enforced mode**, where the govern
 ## 1. Architecture Overview
 
 ```
- ┌──────────────┐         ┌─────────────────────┐         ┌──────────────────┐
+ ┌───────────-───┐         ┌───────────────────-──┐         ┌────────-──────────┐
  │  EP Service   │  token  │   Governed Proxy     │  SQL    │   Target DB       │
  │  (MCP server) │────────▶│   (Docker, port 8201)│────────▶│   (PostgreSQL)    │
  │  No target DB │         │   Owns DB creds      │         │   TLS enabled     │
- └──────────────┘         └─────────────────────┘         └──────────────────┘
+ └───────────-───┘         └──────────────────-───┘         └───────-───────────┘
         │                          │
         │                          ▼
-        │                 ┌─────────────────────┐
+        │                 ┌──────────────────-───┐
         │                 │  Governance DB       │
         └────────────────▶│  (ep_governance      │
-                          │   schema)             │
-                          └─────────────────────┘
+                          │   schema)            │
+                          └──────────────────-───┘
 ```
 
 **Key invariant:** In enforced mode, the agent cannot reach the target database directly — not via credentials, not via network. Every SQL statement flows through the proxy, which validates a signed Ed25519 token, checks governance policy, executes against the target DB, and records the audit event.
@@ -101,12 +101,12 @@ print('PRIVATE (hex):', bytes(km.private_key).hex())
 
 ### What the proxy needs
 
-| Secret | Purpose |
-|--------|---------|
-| `EP_DB_URL` | Connects to governance DB (audit log, policy tables) |
-| `EP_PROXY_TARGET_URL` | Connects to target DB (executes agent SQL) |
-| `EP_PUBLIC_KEY` | Ed25519 public key (verifies tokens, cannot mint them) |
-| `EP_EP_SERVICE_ID` | XID of the EP service principal |
+|       Secret          |              Purpose                                  |
+|-----------------------|-------------------------------------------------------|
+| `EP_DB_URL`           | Connects to governance DB (audit log, policy tables)  |
+| `EP_PROXY_TARGET_URL` | Connects to target DB (executes agent SQL)            |
+| `EP_PUBLIC_KEY`       | Ed25519 public key (verifies tokens, can't mint them) |
+| `EP_EP_SERVICE_ID`    | XID of the EP service principal                       |
 
 ### What the proxy must NOT have
 
