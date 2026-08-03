@@ -1115,17 +1115,30 @@ def serve(
     proxy_url: str = typer.Option(
         "", "--proxy-url",
         help="Proxy health check URL (e.g., http://100.64.0.20:8201/health). "
-             "If provided, the deployment verifier will actively check proxy health.",
+             "REQUIRED in enforced mode — proxy health must be actively verified.",
+    ),
+    agent_config: str = typer.Option(
+        "", "--agent-config",
+        help="Path to root-owned agent configuration file that maps this "
+             "launcher instance to a specific agent principal. "
+             "Example: /etc/ep-governance/agents/mary-wise.toml",
+    ),
+    agent_tools_file: str = typer.Option(
+        "", "--agent-tools-file",
+        help="Path to the agent's complete tool manifest (from the orchestrator). "
+             "REQUIRED in enforced mode — one tool name per line.",
     ),
 ) -> None:
     """Start the MCP server.
 
-    The server loads the EP service principal identity from the database
-    (not from a caller-supplied argument).  This prevents identity spoofing
-    through command-line arguments.
+    The server loads the agent principal identity from a root-owned
+    configuration file (not from a caller-supplied argument). This
+    prevents identity spoofing through command-line arguments while
+    ensuring the connected agent is identified as itself, not as the
+    EP Service principal.
 
     Before starting in enforced mode, the deployment verifier checks
-    isolation conditions and prints the enforcement report.  If binding
+    isolation conditions and prints the enforcement report. If binding
     enforcement is not active, the server prints a warning and operates
     in advisory mode regardless of the EP_MODE setting.
     """
@@ -1134,12 +1147,20 @@ def serve(
     from .deployment import verify_deployment, format_enforcement_report
     cfg = load_config()
 
+    # Load agent tool manifest (required in enforced mode).
+    agent_tools: list[str] | None = None
+    if agent_tools_file:
+        try:
+            with open(agent_tools_file) as f:
+                agent_tools = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+        except FileNotFoundError:
+            typer.echo(f"ERROR: Agent tools file not found: {agent_tools_file}", err=True)
+            raise typer.Exit(1)
+
     # Verify deployment isolation before starting.
-    # This is the enforcement-attestation layer: EP_MODE=enforced is a
-    # request, not a guarantee.  The effective mode depends on whether
-    # the deployment actually satisfies isolation requirements.
     deployment_status = verify_deployment(
         requested_mode=cfg.mode,
+        agent_tools=agent_tools,
         proxy_health_url=proxy_url or None,
     )
 
@@ -1157,26 +1178,85 @@ def serve(
     # Use the effective mode (may be downgraded from enforced to advisory).
     effective_mode = deployment_status.effective_mode
 
-    # Load the EP service principal identity from the database.
-    # This is NOT caller-supplied — it is derived from the database
-    # to prevent identity spoofing.
+    # Load the agent principal identity from a root-owned config file.
+    # This binds the launcher to a specific agent, NOT to the EP Service.
+    # The EP Service identity is reserved for internal governance operations.
     import sqlalchemy as _sa
     engine = _sa.create_engine(cfg.db_url) if not cfg.db_schema else None
     if engine is None:
         from .db.postgres import create_engine as _ce
         engine = _ce(cfg.db_url, schema=cfg.db_schema or None)
-    with engine.connect() as _conn:
-        result = _conn.execute(_sa.text(
-            "SELECT id FROM ep_principals WHERE type='service' AND name='EP Service' LIMIT 1"
-        ))
-        row = result.fetchone()
-        principal_id = row[0] if row else None
-    if not principal_id:
-        typer.echo("ERROR: EP Service principal not found. Run 'ep-governance init' first.")
-        raise typer.Exit(1)
+
+    principal_id: str | None = None
+
+    if agent_config:
+        # Load agent principal ID from root-owned config file.
+        import tomllib
+        try:
+            with open(agent_config, "rb") as f:
+                agent_cfg = tomllib.load(f)
+            principal_id = agent_cfg.get("principal_id")
+            principal_name = agent_cfg.get("name", "unknown")
+        except FileNotFoundError:
+            typer.echo(f"ERROR: Agent config file not found: {agent_config}", err=True)
+            raise typer.Exit(1)
+        except Exception as exc:
+            typer.echo(f"ERROR: Failed to parse agent config: {exc}", err=True)
+            raise typer.Exit(1)
+
+        if not principal_id:
+            typer.echo(
+                f"ERROR: Agent config {agent_config} does not contain 'principal_id'. "
+                f"The config must map this launcher to a specific agent principal.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+        # Verify the principal exists and is an agent type.
+        with engine.connect() as _conn:
+            result = _conn.execute(_sa.text(
+                "SELECT id, type, name FROM ep_principals WHERE id = :pid LIMIT 1"
+            ), {"pid": principal_id})
+            row = result.fetchone()
+        if not row:
+            typer.echo(f"ERROR: Principal {principal_id} not found in database.", err=True)
+            raise typer.Exit(1)
+        if row[1] != "agent":
+            typer.echo(
+                f"ERROR: Principal {principal_id} is type '{row[1]}', not 'agent'. "
+                f"The launcher must bind to an agent principal, not a service or human.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        typer.echo(f"Agent principal: {row[2]} ({principal_id})")
+    else:
+        # No agent config provided — this is only allowed in advisory/dev mode.
+        if effective_mode == "enforced":
+            typer.echo(
+                "ERROR: --agent-config is required in enforced mode. "
+                "The launcher must bind to a specific agent principal via a "
+                "root-owned configuration file. The EP Service identity is "
+                "reserved for internal governance operations.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        # In advisory mode, fall back to EP Service for compatibility.
+        typer.echo(
+            "WARNING: No --agent-config provided. Using EP Service identity. "
+            "This is only acceptable in advisory mode.",
+            err=True,
+        )
+        with engine.connect() as _conn:
+            result = _conn.execute(_sa.text(
+                "SELECT id FROM ep_principals WHERE type='service' AND name='EP Service' LIMIT 1"
+            ))
+            row = result.fetchone()
+            principal_id = row[0] if row else None
+        if not principal_id:
+            typer.echo("ERROR: EP Service principal not found. Run 'ep-governance init' first.")
+            raise typer.Exit(1)
 
     # HTTP mode requires transport authentication (not yet implemented).
-    # Refuse to start in HTTP mode to prevent unauthenticated remote access.
     if http:
         typer.echo(
             "ERROR: HTTP transport is not yet supported. "

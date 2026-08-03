@@ -138,6 +138,46 @@ class TestCommentInjection:
         assert result.action_type == "postgres.execute.drop"
         assert result.requires_approval is True
 
+    def test_multiple_comments_then_drop(self, classifier):
+        """-- comment1\n-- comment2\nDROP TABLE users — multiple comments before DROP."""
+        result = classifier.classify("postgres.execute", {
+            "sql": "-- first comment\n-- second comment\nDROP TABLE users"
+        })
+        assert result.action_type == "postgres.execute.drop"
+        assert result.requires_approval is True
+
+    def test_block_comment_then_drop(self, classifier):
+        """/* comment */ DROP TABLE users — block comment before DROP."""
+        result = classifier.classify("postgres.execute", {
+            "sql": "/* this is a comment */\nDROP TABLE users"
+        })
+        assert result.action_type == "postgres.execute.drop"
+        assert result.requires_approval is True
+
+    def test_mixed_comments_then_drop(self, classifier):
+        """-- line comment\n/* block comment */\nDROP TABLE users — mixed comments."""
+        result = classifier.classify("postgres.execute", {
+            "sql": "-- line comment\n/* block comment */\nDROP TABLE users"
+        })
+        assert result.action_type == "postgres.execute.drop"
+        assert result.requires_approval is True
+
+    def test_comment_with_fake_keyword_then_drop(self, classifier):
+        """-- SELECT 1\nDROP TABLE users — comment contains fake SQL keyword."""
+        result = classifier.classify("postgres.execute", {
+            "sql": "-- SELECT 1\nDROP TABLE users"
+        })
+        assert result.action_type == "postgres.execute.drop"
+        assert result.requires_approval is True
+
+    def test_comment_then_drop_mixed_case(self, classifier):
+        """-- comment\ndrop table users — mixed case after comment."""
+        result = classifier.classify("postgres.execute", {
+            "sql": "-- comment\ndrop table users"
+        })
+        assert result.action_type == "postgres.execute.drop"
+        assert result.requires_approval is True
+
 
 class TestObfuscation:
     """Various obfuscation attempts."""

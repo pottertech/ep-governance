@@ -311,9 +311,40 @@ class SQLClassifier(ActionClassifier):
         return resources
 
     def _classify_with_regex(self, sql: str) -> ClassificationResult:
-        """Fallback regex classification with medium confidence."""
+        """Fallback regex classification with medium confidence.
+
+        Strips leading SQL comments (line comments ``--`` and block
+        comments ``/* ... */``) before matching the first SQL verb.
+        This ensures that comment-obfuscated statements like
+        ``-- comment\\nDROP TABLE users`` are classified correctly
+        even when sqlglot is not available.
+        """
+        # Strip leading line comments (-- ... \n) and block comments (/* ... */)
+        # before attempting regex match. We repeatedly strip leading whitespace
+        # and comments so that multiple comments before the first verb are handled.
+        cleaned = sql
+        while True:
+            cleaned = cleaned.lstrip()
+            # Strip line comment: -- ... up to newline
+            if cleaned.startswith("--"):
+                idx = cleaned.find("\n")
+                if idx == -1:
+                    # Entire rest is a comment — no SQL statement
+                    break
+                cleaned = cleaned[idx + 1:]
+                continue
+            # Strip block comment: /* ... */
+            if cleaned.startswith("/*"):
+                idx = cleaned.find("*/")
+                if idx == -1:
+                    # Unterminated block comment — no valid SQL
+                    break
+                cleaned = cleaned[idx + 2:]
+                continue
+            break
+
         for pattern, op in _SQL_REGEX_PATTERNS:
-            if pattern.match(sql):
+            if pattern.match(cleaned):
                 action_type = f"postgres.execute.{op}"
                 requires_approval = op not in ("select",)
                 return ClassificationResult(

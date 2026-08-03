@@ -31,243 +31,48 @@ from .db.repositories import (
 from .errors import PolicyIntegrityError, EPError
 from .policy_engine import PolicyEngine
 from .transitions import TransitionEngine
+from .tool_catalog import (
+    TOOL_REQUIRED_ROLES,
+    ADVISORY_TOOL_DEFS,
+    ENFORCED_TOOL_DEFS,
+    get_governed_tools,
+    is_governed_tool,
+)
 from .xid import XID
 
-__all__ = ["create_server", "run_server", "get_tools"]
+__all__ = ["create_server", "run_server", "get_tools", "get_governed_tools", "is_governed_tool"]
 
 
 # --------------------------------------------------------------------------- #
 # Role-based authorization for MCP tools
 # --------------------------------------------------------------------------- #
-
-# Required roles per tool name.  A principal must hold at least one of the
-# listed roles to invoke the tool.  See ``_check_role`` for the lookup logic.
-TOOL_REQUIRED_ROLES: dict[str, list[str]] = {
-    "ep_check": ["agent", "operator", "administrator"],
-    "ep_execute": ["agent", "operator", "administrator"],
-    "ep_status": ["observer", "agent", "operator", "administrator"],
-    "ep_log": ["observer", "agent", "operator", "administrator"],
-    "ep_list_policies": ["observer", "agent", "operator", "administrator"],
-    "ep_pending_approvals": ["observer", "agent", "operator", "administrator"],
-    "ep_approve": ["policy_approver", "administrator"],
-    "ep_deny": ["policy_approver", "administrator"],
-    "ep_audit_verify": ["auditor", "administrator"],
-}
+#
+# TOOL_REQUIRED_ROLES is imported from tool_catalog (dependency-free module).
+# It is re-exported here for backwards compatibility.
 
 
 # ---------------------------------------------------------------------------
-# Tool definitions
+# Tool definitions — built from tool_catalog plain dicts at import time.
+# The catalog itself (src/ep_governance/tool_catalog.py) has no MCP
+# dependency; we wrap each plain-dict definition in an MCP ``Tool`` here.
 # ---------------------------------------------------------------------------
 
-ADVISORY_TOOLS: list[Tool] = [
-    Tool(
-        name="ep_check",
-        description="Evaluate a proposed action without executing. Returns admissible/denied/pending.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "tool": {"type": "string", "description": "Tool name (e.g. postgres.execute)"},
-                "arguments": {"type": "object", "description": "Tool arguments as JSON"},
-                "branch_id": {"type": "string", "description": "Branch XID"},
-                # agent_id is no longer caller-supplied; it is derived from the
-                # authenticated MCP session principal (see create_server).
-            },
-            "required": ["tool", "arguments"],
-        },
-    ),
-    Tool(
-        name="ep_status",
-        description="Get current governance status: branch head, version, active policies.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "branch_id": {"type": "string", "description": "Branch XID (optional)"},
-            },
-        },
-    ),
-    Tool(
-        name="ep_log",
-        description="List recent transitions.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string", "description": "Filter by agent XID (optional)"},
-                "branch_id": {
-                    "type": "string",
-                    "description": "Branch XID (scopes results to project)",
-                },
-                "project_id": {
-                    "type": "string",
-                    "description": "Project XID (scopes results to project)",
-                },
-            },
-        },
-    ),
-    Tool(
-        name="ep_list_policies",
-        description="List active governance policies.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "agent_id": {"type": "string", "description": "Filter by agent XID (optional)"},
-                "branch_id": {
-                    "type": "string",
-                    "description": "Branch XID (scopes results to project)",
-                },
-                "project_id": {
-                    "type": "string",
-                    "description": "Project XID (scopes results to project)",
-                },
-            },
-        },
-    ),
-    Tool(
-        name="ep_pending_approvals",
-        description="List pending approval requests.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "branch_id": {
-                    "type": "string",
-                    "description": "Branch XID (scopes results to project)",
-                },
-                "project_id": {
-                    "type": "string",
-                    "description": "Project XID (scopes results to project)",
-                },
-            },
-        },
-    ),
-    Tool(
-        name="ep_approve",
-        description="Approve a pending request. Requires policy_approver role.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "approval_id": {"type": "string", "description": "Approval request XID"},
-                # approver_id is no longer caller-supplied; it is derived from
-                # the authenticated MCP session principal (see create_server).
-                "reason": {"type": "string", "description": "Approval reason"},
-            },
-            "required": ["approval_id"],
-        },
-    ),
-    Tool(
-        name="ep_deny",
-        description="Deny a pending request. Requires policy_approver role.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "approval_id": {"type": "string", "description": "Approval request XID"},
-                # approver_id is no longer caller-supplied; it is derived from
-                # the authenticated MCP session principal (see create_server).
-                "reason": {"type": "string", "description": "Denial reason"},
-            },
-            "required": ["approval_id"],
-        },
-    ),
-    Tool(
-        name="ep_audit_verify",
-        description="Verify the audit chain for a lattice.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "lattice_id": {"type": "string", "description": "Lattice XID"},
-            },
-            "required": ["lattice_id"],
-        },
-    ),
-]
 
-ENFORCED_TOOLS: list[Tool] = [
-    Tool(
-        name="ep_execute",
-        description="Request authorization and execute through the governed proxy. "
-        "The agent does not hold target credentials — the proxy executes on the agent's behalf.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "tool": {"type": "string", "description": "Tool name (e.g. postgres.execute)"},
-                "arguments": {"type": "object", "description": "Tool arguments as JSON"},
-                "branch_id": {"type": "string", "description": "Branch XID"},
-                # agent_id is no longer caller-supplied; it is derived from the
-                # authenticated MCP session principal (see create_server).
-            },
-            "required": ["tool", "arguments", "branch_id"],
-        },
-    ),
-    Tool(
-        name="ep_status",
-        description="Get current governance status.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "branch_id": {"type": "string"},
-            },
-        },
-    ),
-    Tool(
-        name="ep_list_policies",
-        description="List active governance policies.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "branch_id": {
-                    "type": "string",
-                    "description": "Branch XID (scopes results to project)",
-                },
-                "project_id": {
-                    "type": "string",
-                    "description": "Project XID (scopes results to project)",
-                },
-            },
-        },
-    ),
-    Tool(
-        name="ep_pending_approvals",
-        description="List pending approval requests.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "branch_id": {
-                    "type": "string",
-                    "description": "Branch XID (scopes results to project)",
-                },
-                "project_id": {
-                    "type": "string",
-                    "description": "Project XID (scopes results to project)",
-                },
-            },
-        },
-    ),
-    Tool(
-        name="ep_approve",
-        description="Approve a pending request. Requires policy_approver role and human principal.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "approval_id": {"type": "string"},
-                # approver_id is no longer caller-supplied; it is derived from
-                # the authenticated MCP session principal (see create_server).
-                "reason": {"type": "string"},
-            },
-            "required": ["approval_id"],
-        },
-    ),
-    Tool(
-        name="ep_audit_verify",
-        description="Verify the audit chain for a lattice.",
-        inputSchema={
-            "type": "object",
-            "properties": {"lattice_id": {"type": "string"}},
-            "required": ["lattice_id"],
-        },
-    ),
-]
+def _to_mcp_tool(defn: dict[str, Any]) -> Tool:
+    """Convert a plain-dict tool definition into an MCP ``Tool``."""
+    return Tool(
+        name=defn["name"],
+        description=defn.get("description"),
+        inputSchema=defn.get("inputSchema", {}),
+    )
+
+
+ADVISORY_TOOLS: list[Tool] = [_to_mcp_tool(d) for d in ADVISORY_TOOL_DEFS]
+ENFORCED_TOOLS: list[Tool] = [_to_mcp_tool(d) for d in ENFORCED_TOOL_DEFS]
 
 
 def get_tools(mode: str = "enforced") -> list[Tool]:
-    """Return the tool list for the given mode."""
+    """Return the MCP tool list for the given mode."""
     if mode == "enforced":
         return ENFORCED_TOOLS
     return ADVISORY_TOOLS

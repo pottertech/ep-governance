@@ -369,13 +369,21 @@ def check_agent_tool_manifest(
         )
 
     if non_governed:
+        # In enforced mode, unknown tools must fail closed.
+        # A generic browser, Python runner, automation tool, or custom
+        # plugin may provide a bypass even if its name is not in _RAW_TOOLS.
+        # Known governed tool -> pass
+        # Known prohibited tool -> fail
+        # Unknown tool -> fail pending review
+        unknown_list = sorted(list(non_governed)[:5])
         return IsolationCheck(
             name="no_raw_tools_in_manifest",
-            passed=True,
+            passed=False,
             evidence=(
-                f"No known raw tools found, but {len(non_governed)} unclassified "
-                f"tool(s) present: {', '.join(sorted(list(non_governed)[:5]))}. "
-                f"Review whether any can reach protected targets."
+                f"{len(non_governed)} unclassified tool(s) not in the governed "
+                f"tool set: {', '.join(unknown_list)}. "
+                f"In enforced mode, unknown tools must be reviewed and either "
+                f"added to the governed set or removed. Fail-closed pending review."
             ),
         )
 
@@ -472,18 +480,35 @@ def verify_deployment(
 
     checks: list[IsolationCheck] = []
 
-    # --- Runtime checks ---
+    # --- Runtime checks (EP server environment) ---
+    # These verify the EP server's own environment. They do NOT verify
+    # the agent's environment — that requires a signed attestation from
+    # the agent runtime (see agent-side attestation checks below).
     runtime_checks = check_runtime_environment(env)
     checks.extend(runtime_checks)
 
-    # --- Agent tool manifest check ---
+    # --- Agent tool manifest check (REQUIRED in enforced mode) ---
+    # In enforced mode, the complete tool manifest MUST be supplied.
+    # Without it, the most important bypass check — whether the agent
+    # has shell, Python, PostgreSQL, Docker, SSH, or filesystem tools —
+    # is skipped. This would allow a false claim of enforced mode.
     if agent_tools is not None:
         tool_check = check_agent_tool_manifest(agent_tools)
         checks.append(tool_check)
+    else:
+        checks.append(IsolationCheck(
+            name="agent_tool_manifest_supplied",
+            passed=False,
+            evidence=(
+                "Complete agent capability manifest was not supplied. "
+                "In enforced mode, the manifest must come from the trusted "
+                "orchestrator, not from the agent."
+            ),
+        ))
 
-    # --- Attestation checks ---
-    # Each assertion maps to an IsolationCheck.
-    # If the assertion is not set, it's a failed required check.
+    # --- Attestation checks (all 9 fields) ---
+    # Every required attestation property must become an explicit
+    # IsolationCheck. Previously, only 4 of the 9 fields were enforced.
     attestation_checks = [
         ("proxy_separate_process", attestation.proxy_separate_process,
          "Proxy must run as a separate process from the agent"),
@@ -492,7 +517,26 @@ def verify_deployment(
         ("target_network_restricted", attestation.target_network_restricted_to_proxy,
          "Target network must be restricted to proxy only"),
         ("proxy_health_verified", attestation.proxy_health_verified,
-         "Proxy health must be verified"),
+         "Proxy health must be verified by the orchestrator"),
+        # Agent-side assertions — these are distinct from the EP server
+        # runtime checks above. The EP server cannot inspect the agent's
+        # environment directly; these assertions must come from a signed
+        # attestation produced inside the agent runtime.
+        ("agent_no_target_credentials_attested",
+         attestation.agent_has_no_target_credentials,
+         "Agent must not possess target DB credentials (attested from agent runtime)"),
+        ("agent_no_docker_socket_attested",
+         attestation.agent_has_no_docker_socket,
+         "Agent must not have Docker socket access (attested from agent runtime)"),
+        ("agent_no_ssh_agent_attested",
+         attestation.agent_has_no_ssh_agent,
+         "Agent must not have SSH agent access (attested from agent runtime)"),
+        ("agent_no_cloud_credentials_attested",
+         attestation.agent_has_no_cloud_credentials,
+         "Agent must not have cloud CLI credentials (attested from agent runtime)"),
+        ("agent_no_raw_tools_attested",
+         attestation.raw_tools_removed,
+         "Agent must not have raw bypass tools (attested from agent runtime)"),
     ]
 
     for name, asserted, description in attestation_checks:
@@ -506,7 +550,12 @@ def verify_deployment(
             ),
         ))
 
-    # --- Proxy health check (active) ---
+    # --- Active proxy health check (REQUIRED in enforced mode) ---
+    # In enforced mode, proxy health must be actively verified, not
+    # merely asserted. A mere HTTP 200 response is necessary but not
+    # sufficient — in production, the health response should be signed
+    # or protected by mTLS. For now, we require the URL to be provided
+    # and the HTTP check to succeed.
     if proxy_health_url:
         proxy_ok = _check_proxy_health(proxy_health_url)
         checks.append(IsolationCheck(
@@ -516,6 +565,17 @@ def verify_deployment(
                 f"Proxy health check passed at {proxy_health_url}"
                 if proxy_ok
                 else f"Proxy health check FAILED at {proxy_health_url}"
+            ),
+        ))
+    else:
+        # In enforced mode, proxy health URL is required.
+        checks.append(IsolationCheck(
+            name="proxy_health_active",
+            passed=False,
+            evidence=(
+                "Active proxy health check was not performed — "
+                "proxy URL not provided. In enforced mode, proxy health "
+                "must be actively verified, not merely asserted."
             ),
         ))
 

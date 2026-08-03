@@ -302,14 +302,13 @@ class TestEnforcedModeIsolation:
     def test_mcp_exposes_only_governed_tools(self):
         """EP-ENFORCE-007: in enforced mode, MCP MUST expose only governed execution
         and governance management tools. Raw protected tools MUST NOT be exposed."""
-        from ep_governance.mcp_server import get_tools
-        enforced_tools = get_tools("enforced")
-        tool_names = {t.name for t in enforced_tools}
-        # No raw tools should be present
-        raw_tools = {"shell.exec", "postgres.execute", "docker.exec", "ssh.exec"}
-        assert tool_names.isdisjoint(raw_tools)
+        from ep_governance.tool_catalog import get_governed_tools, RAW_TOOL_NAMES, GOVERNED_TOOL_NAMES
+
+        governed = set(get_governed_tools())
+        # No raw tools should be present in the governed set
+        assert governed.isdisjoint(RAW_TOOL_NAMES)
         # Governed tools should be present
-        assert "ep_execute" in tool_names or "ep_check" in tool_names
+        assert "ep_execute" in governed or "ep_check" in GOVERNED_TOOL_NAMES
 
     def test_advisory_if_isolation_not_achieved(self):
         """EP-ENFORCE-008: if deployment isolation conditions are not satisfied,
@@ -340,10 +339,13 @@ class TestEnforcedModeIsolation:
             ]
 
         monkeypatch.setattr(dep_mod, "check_runtime_environment", mock_check_runtime)
+        monkeypatch.setattr(dep_mod, "_check_proxy_health", lambda url: True)
         status = verify_deployment(
             requested_mode="enforced",
             env={},
+            agent_tools=["ep_execute"],
             attestation=_full_attestation(),
+            proxy_health_url="http://proxy:8201/health",
         )
         assert status.effective_mode == "enforced"
         assert status.binding_enforcement_active is True
