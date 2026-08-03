@@ -118,12 +118,12 @@ Without these deployment measures, EP-Governance operates in advisory mode regar
 
 | Item | Value |
 |------|-------|
-| Tested commit | `74e078d` (August 2, 2026) |
+| Tested commit | `569af01` (August 2, 2026) |
 | Python | 3.12+ |
 | PostgreSQL | 17 (Docker container for PG integration tests) |
 | SQLite | Built-in (default for unit/property/contract tests) |
-| Total tests collected | 1081 |
-| Test results (without PG) | 1070 passed, 11 skipped |
+| Total tests collected | 1118 |
+| Test results (without PG) | 1107 passed, 11 skipped |
 | PG integration tests | 10 (skipped without `EP_TEST_DB_URL`; pass with it set) |
 | 11th skip | `test_pg_migration_uses_transactional_ddl` (requires PostgreSQL, not just `EP_TEST_DB_URL`) |
 | E2e tests | 4 (standalone scripts, run against live PostgreSQL) |
