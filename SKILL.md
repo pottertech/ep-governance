@@ -6,11 +6,13 @@ This skill provides the integration point between Hermes agents and the EP-Gover
 
 ## Deployment
 
-- Mode: enforced (verified July 30, 2026)
+- Mode: enforced (verified July 30, 2026; enforcement architecture expanded August 2, 2026)
 - Database: NAS PostgreSQL at 100.98.247.27:5433 (ep_governance schema in gbrain_pilot_test)
 - CLI wrapper: `/usr/local/bin/ep-governance`
 - MCP server: configured in Hermes config.yaml
 - Ed25519 signing key: `ep_signing_test.key` (EP holds private key, proxies hold public key)
+- Production config flags: EP_ALLOW_ADVISORY_EXECUTION=false, EP_REQUIRE_SIGNED_AUTHORIZATION=true, EP_FAIL_CLOSED=true
+- Advisory mode rejected at config load time in production
 
 ## Registered entities
 
