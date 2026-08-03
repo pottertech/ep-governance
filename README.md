@@ -51,6 +51,8 @@ EP-Governance uses Ed25519 signatures, payload hashes, single-use authorization 
 
 Advisory mode tells the agent what it should do but does not place EP-Governance in the execution path. An agent can ignore the recommendation and act directly. Advisory mode is available only in development (EP_DEV=true + EP_ALLOW_ADVISORY_EXECUTION=true) and is rejected at config load time in production. Actual prevention requires enforced mode, where the agent lacks direct access to the operational target and must go through an EP-controlled proxy.
 
+EP_MODE=enforced is a request, not a guarantee. The deployment verification module (deployment.py) checks isolation conditions at startup and computes an effective mode. If any required check fails (target credentials in env, Docker socket accessible, raw tools in manifest, proxy not separate, network not restricted), the effective mode downgrades to advisory with reasons. The CLI serve command prints the enforcement report and uses the effective mode, not the requested mode.
+
 ### BT is a planning budget, not a compute quota
 
 EP-Governance can assign a proposed action a budget value and reject actions that exceed the planned allowance. It cannot measure or enforce actual CPU, GPU, RAM, API tokens, network bandwidth, storage I/O, or cloud spending. Real enforcement requires infrastructure-specific controls: Linux cgroups, Kubernetes resource limits, Docker constraints, cloud-provider budget APIs, LLM token metering, database statement limits, process timeouts, network quotas, GPU schedulers.
@@ -102,6 +104,7 @@ To achieve binding enforcement (not merely advisory):
 9. Use narrowly-scoped proxies with least-privilege credentials (separate read-only, write, email, deployment proxies).
 10. Run bypass detection reconciliation (target activity log vs EP audit log).
 11. In production, advisory mode is rejected at config load time. Set `EP_MODE=enforced`, `EP_ALLOW_ADVISORY_EXECUTION=false`, `EP_REQUIRE_SIGNED_AUTHORIZATION=true`, `EP_FAIL_CLOSED=true`.
+12. Provide deployment assertions (EP_ASSERT_* env vars) or an explicit EnforcementAttestation so the deployment verifier can confirm isolation. Without attestation, effective mode downgrades to advisory even when EP_MODE=enforced.
 
 Without these deployment measures, EP-Governance operates in advisory mode regardless of the `EP_MODE=enforced` setting. See [Enforced Mode Deployment](docs/deployment/enforced-mode.md) for a complete guide.
 
@@ -115,16 +118,16 @@ Without these deployment measures, EP-Governance operates in advisory mode regar
 
 | Item | Value |
 |------|-------|
-| Tested commit | `e3ac573` (August 2, 2026) |
+| Tested commit | pending (this commit) |
 | Python | 3.12+ |
 | PostgreSQL | 17 (Docker container for PG integration tests) |
 | SQLite | Built-in (default for unit/property/contract tests) |
-| Total tests collected | 1010 |
-| Test results (without PG) | 999 passed, 11 skipped |
+| Total tests collected | 1081 |
+| Test results (without PG) | 1070 passed, 11 skipped |
 | PG integration tests | 10 (skipped without `EP_TEST_DB_URL`; pass with it set) |
 | 11th skip | `test_pg_migration_uses_transactional_ddl` (requires PostgreSQL, not just `EP_TEST_DB_URL`) |
 | E2e tests | 4 (standalone scripts, run against live PostgreSQL) |
-| Test categories | unit (418), property (38), contract (298), integration (154), security (99), concurrency (4) |
+| Test categories | unit (418), property (38), contract (310), integration (154), security (169), concurrency (4) |
 | Duration | ~29 seconds (SQLite), ~55 seconds (with PG integration) |
 | Skipped tests | PostgreSQL-only tests that require `EP_TEST_DB_URL` environment variable |
 | PG integration tests | Set `EP_TEST_DB_URL=postgresql://user:pass@host:port/db` and run `pytest tests/integration/test_pg_integration.py` |

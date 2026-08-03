@@ -1112,27 +1112,83 @@ def cancel(
 def serve(
     http: bool = typer.Option(False, "--http", help="Use HTTP transport instead of stdio."),
     port: int = typer.Option(8200, "--port", help="HTTP port."),
+    proxy_url: str = typer.Option(
+        "", "--proxy-url",
+        help="Proxy health check URL (e.g., http://100.64.0.20:8201/health). "
+             "If provided, the deployment verifier will actively check proxy health.",
+    ),
 ) -> None:
-    """Start the MCP server."""
+    """Start the MCP server.
+
+    The server loads the EP service principal identity from the database
+    (not from a caller-supplied argument).  This prevents identity spoofing
+    through command-line arguments.
+
+    Before starting in enforced mode, the deployment verifier checks
+    isolation conditions and prints the enforcement report.  If binding
+    enforcement is not active, the server prints a warning and operates
+    in advisory mode regardless of the EP_MODE setting.
+    """
     import asyncio
     from .mcp_server import run_server
+    from .deployment import verify_deployment, format_enforcement_report
     cfg = load_config()
-    # In advisory/dev mode, use the EP service principal for MCP operations
-    # In production, this must come from authenticated transport credentials
+
+    # Verify deployment isolation before starting.
+    # This is the enforcement-attestation layer: EP_MODE=enforced is a
+    # request, not a guarantee.  The effective mode depends on whether
+    # the deployment actually satisfies isolation requirements.
+    deployment_status = verify_deployment(
+        requested_mode=cfg.mode,
+        proxy_health_url=proxy_url or None,
+    )
+
+    # Print the enforcement report so operators can see the status.
+    typer.echo(format_enforcement_report(deployment_status))
+
+    if cfg.mode == "enforced" and not deployment_status.binding_enforcement_active:
+        typer.echo(
+            "\nWARNING: Binding enforcement is NOT active. "
+            "The server will operate in advisory mode. "
+            "Fix the failed checks above or use EP_MODE=advisory explicitly.",
+            err=True,
+        )
+
+    # Use the effective mode (may be downgraded from enforced to advisory).
+    effective_mode = deployment_status.effective_mode
+
+    # Load the EP service principal identity from the database.
+    # This is NOT caller-supplied — it is derived from the database
+    # to prevent identity spoofing.
     import sqlalchemy as _sa
     engine = _sa.create_engine(cfg.db_url) if not cfg.db_schema else None
     if engine is None:
         from .db.postgres import create_engine as _ce
         engine = _ce(cfg.db_url, schema=cfg.db_schema or None)
     with engine.connect() as _conn:
-        result = _conn.execute(_sa.text("SELECT id FROM ep_principals WHERE type='service' AND name='EP Service' LIMIT 1"))
+        result = _conn.execute(_sa.text(
+            "SELECT id FROM ep_principals WHERE type='service' AND name='EP Service' LIMIT 1"
+        ))
         row = result.fetchone()
         principal_id = row[0] if row else None
     if not principal_id:
         typer.echo("ERROR: EP Service principal not found. Run 'ep-governance init' first.")
         raise typer.Exit(1)
+
+    # HTTP mode requires transport authentication (not yet implemented).
+    # Refuse to start in HTTP mode to prevent unauthenticated remote access.
+    if http:
+        typer.echo(
+            "ERROR: HTTP transport is not yet supported. "
+            "Remote MCP requires mTLS, JWT/OAuth, or signed API key authentication. "
+            "Use stdio mode (default) for local agent integration.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    typer.echo(f"\nStarting MCP server (effective mode: {effective_mode})")
     asyncio.run(run_server(
-        mode=cfg.mode,
+        mode=effective_mode,
         authenticated_principal_id=principal_id,
     ))
 

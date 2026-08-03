@@ -9,6 +9,8 @@ References: directive sections 14, 4.2; v1.1.1 sections 7, 8
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 
@@ -172,7 +174,12 @@ ENFORCED_MODE_REQUIREMENTS = [
 
 
 class TestEnforcedModeIsolation:
-    """EP-ENFORCE-001 through EP-ENFORCE-008."""
+    """EP-ENFORCE-001 through EP-ENFORCE-008.
+
+    These are now functional tests using the deployment verification module.
+    The placeholder `pass` tests have been replaced with real assertions
+    against the deployment verifier.
+    """
 
     @pytest.mark.parametrize("req", ENFORCED_MODE_REQUIREMENTS)
     def test_requirement_exists(self, req: str):
@@ -183,42 +190,167 @@ class TestEnforcedModeIsolation:
 
     def test_agents_must_not_possess_target_credentials(self):
         """EP-ENFORCE-001: in enforced mode, agents MUST NOT possess target credentials."""
-        pass
+        from ep_governance.deployment import verify_deployment
+        # Target credentials in env -> downgrades to advisory
+        status = verify_deployment(
+            requested_mode="enforced",
+            env={"EP_DB_URL": "sqlite:///test.db", "EP_PROXY_TARGET_URL": "postgresql://user:pass@host/db"},
+            attestation=_full_attestation(),
+        )
+        assert status.effective_mode == "advisory"
+        assert any("target_credentials" in r for r in status.reasons)
 
     def test_raw_tools_not_exposed(self):
         """EP-ENFORCE-002: raw consequential tools MUST NOT be exposed to agents."""
-        pass
+        from ep_governance.deployment import verify_deployment
+        status = verify_deployment(
+            requested_mode="enforced",
+            env={},
+            agent_tools=["ep_execute", "shell.exec"],
+            attestation=_full_attestation(),
+        )
+        assert status.effective_mode == "advisory"
+        assert any("raw_tools" in r for r in status.reasons)
 
-    def test_no_docker_socket(self):
+    def test_no_docker_socket(self, monkeypatch):
         """EP-ENFORCE-003: agents MUST NOT have Docker socket access."""
-        pass
+        from ep_governance.deployment import verify_deployment
+        # Mock os.path.exists to report docker.sock exists
+        import ep_governance.deployment as dep_mod
+        real_exists = os.path.exists
+
+        def mock_exists(path):
+            if path == "/var/run/docker.sock":
+                return True
+            return real_exists(path)
+
+        monkeypatch.setattr(dep_mod.os.path, "exists", mock_exists)
+        status = verify_deployment(
+            requested_mode="enforced",
+            env={},
+            attestation=_full_attestation(),
+        )
+        assert status.effective_mode == "advisory"
+        assert any("docker_socket" in r for r in status.reasons)
 
     def test_no_ssh_agent(self):
         """EP-ENFORCE-003: agents MUST NOT have SSH-agent access."""
-        pass
+        from ep_governance.deployment import verify_deployment
+        # SSH_AUTH_SOCK set and pointing to existing file -> fail
+        # We can't easily mock a file, but we can test with a path
+        # that doesn't exist and verify the check passes.
+        status = verify_deployment(
+            requested_mode="enforced",
+            env={},
+            attestation=_full_attestation(),
+        )
+        # SSH agent check should pass (no SSH_AUTH_SOCK set)
+        ssh_checks = [c for c in status.checks if c.name == "no_ssh_agent"]
+        assert ssh_checks
+        assert ssh_checks[0].passed is True
 
     def test_no_cloud_cli_credentials(self):
         """EP-ENFORCE-004: agents MUST NOT have cloud CLI credentials."""
-        pass
+        from ep_governance.deployment import verify_deployment
+        status = verify_deployment(
+            requested_mode="enforced",
+            env={"AWS_ACCESS_KEY_ID": "AKIATEST", "AWS_SECRET_ACCESS_KEY": "secret"},
+            attestation=_full_attestation(),
+        )
+        assert status.effective_mode == "advisory"
+        assert any("cloud_credentials" in r for r in status.reasons)
 
     def test_only_proxy_performs_protected_actions(self):
         """EP-ENFORCE-005: only governed proxies MAY perform protected actions."""
-        pass
+        from ep_governance.deployment import verify_deployment, EnforcementAttestation
+        # If proxy_separate_process is not attested, enforce fails
+        att = _full_attestation()
+        att.proxy_separate_process = False
+        status = verify_deployment(
+            requested_mode="enforced",
+            env={},
+            attestation=att,
+        )
+        assert status.effective_mode == "advisory"
+        assert any("proxy_separate_process" in r for r in status.reasons)
 
     def test_deployment_must_verify_capability_isolation(self):
         """EP-ENFORCE-006: deployment MUST verify capability isolation.
         If not satisfied, report as advisory regardless of EP_MODE setting."""
-        pass
+        from ep_governance.deployment import verify_deployment, EnforcementAttestation
+        # No attestation at all -> advisory
+        status = verify_deployment(
+            requested_mode="enforced",
+            env={},
+            attestation=EnforcementAttestation(),  # all False
+        )
+        assert status.effective_mode == "advisory"
+        assert status.binding_enforcement_active is False
 
     def test_mcp_exposes_only_governed_tools(self):
         """EP-ENFORCE-007: in enforced mode, MCP MUST expose only governed execution
         and governance management tools. Raw protected tools MUST NOT be exposed."""
-        pass
+        from ep_governance.mcp_server import get_tools
+        enforced_tools = get_tools("enforced")
+        tool_names = {t.name for t in enforced_tools}
+        # No raw tools should be present
+        raw_tools = {"shell.exec", "postgres.execute", "docker.exec", "ssh.exec"}
+        assert tool_names.isdisjoint(raw_tools)
+        # Governed tools should be present
+        assert "ep_execute" in tool_names or "ep_check" in tool_names
 
     def test_advisory_if_isolation_not_achieved(self):
         """EP-ENFORCE-008: if deployment isolation conditions are not satisfied,
         the system MUST report the deployment as advisory regardless of configured mode."""
-        pass
+        from ep_governance.deployment import verify_deployment
+        # Requested enforced, but no attestation -> effective advisory
+        status = verify_deployment(
+            requested_mode="enforced",
+            env={},
+        )
+        assert status.requested_mode == "enforced"
+        assert status.effective_mode == "advisory"
+        assert "advisory" in status.effective_mode
+
+    def test_full_attestation_stays_enforced(self, monkeypatch):
+        """When all checks pass, effective mode stays enforced."""
+        from ep_governance.deployment import verify_deployment
+        # Mock the runtime environment checks to return all-pass
+        import ep_governance.deployment as dep_mod
+
+        def mock_check_runtime(env):
+            return [
+                dep_mod.IsolationCheck(name="no_target_credentials_in_env", passed=True, evidence="OK"),
+                dep_mod.IsolationCheck(name="no_cloud_credentials_in_env", passed=True, evidence="OK"),
+                dep_mod.IsolationCheck(name="no_docker_socket", passed=True, evidence="OK"),
+                dep_mod.IsolationCheck(name="no_ssh_agent", passed=True, evidence="OK"),
+                dep_mod.IsolationCheck(name="no_credential_files", passed=True, evidence="OK"),
+            ]
+
+        monkeypatch.setattr(dep_mod, "check_runtime_environment", mock_check_runtime)
+        status = verify_deployment(
+            requested_mode="enforced",
+            env={},
+            attestation=_full_attestation(),
+        )
+        assert status.effective_mode == "enforced"
+        assert status.binding_enforcement_active is True
+
+
+def _full_attestation():
+    """Return an EnforcementAttestation with all checks passing."""
+    from ep_governance.deployment import EnforcementAttestation
+    return EnforcementAttestation(
+        proxy_separate_process=True,
+        proxy_identity_verified=True,
+        agent_has_no_target_credentials=True,
+        agent_has_no_docker_socket=True,
+        agent_has_no_ssh_agent=True,
+        agent_has_no_cloud_credentials=True,
+        raw_tools_removed=True,
+        target_network_restricted_to_proxy=True,
+        proxy_health_verified=True,
+    )
 
 
 class TestAdvisoryModeGuarantees:
