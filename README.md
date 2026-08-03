@@ -88,7 +88,7 @@ Without these deployment measures, EP-Governance operates in advisory mode regar
 
 | Item | Value |
 |------|-------|
-| Tested commit | pending (this commit) |
+| Tested commit | `e3ac573` (August 2, 2026) |
 | Python | 3.12+ |
 | PostgreSQL | 17 (Docker container for PG integration tests) |
 | SQLite | Built-in (default for unit/property/contract tests) |
