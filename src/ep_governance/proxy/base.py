@@ -110,6 +110,7 @@ class GovernedProxy(ABC):
         signed_token: str,
         payload: dict[str, Any],
         public_key: Any,
+        enforcement_capability: Any = None,
     ) -> ExecutionResult:
         """Execute a governed action.
 
@@ -120,6 +121,10 @@ class GovernedProxy(ABC):
         4. Verifies proxy audience
         5. Checks for stale authorization (policy set changes)
         6. Atomically claims the authorization
+
+        When enforcement_capability is provided, require_binding_enforcement()
+        is called before any execution. This is the per-operation enforcement
+        boundary at the proxy level.
         7. Executes the action through the bounded adapter
         8. Returns the result
 
@@ -131,6 +136,20 @@ class GovernedProxy(ABC):
         Returns:
             ExecutionResult with success/failure/timeout status.
         """
+        # Enforcement capability check at proxy execution boundary.
+        # This is the per-operation enforcement check — even if the launcher
+        # verified deployment isolation, each proxy execution independently
+        # confirms that binding enforcement is still active.
+        if enforcement_capability is not None:
+            try:
+                enforcement_capability.require_binding_enforcement()
+            except Exception as exc:
+                return ExecutionResult(
+                    success=False,
+                    exit_status="failure",
+                    result_summary=f"Enforcement capability check failed: {exc}",
+                )
+
         attempt_id = str(XID.new())
         started_at = self._now_iso()
 

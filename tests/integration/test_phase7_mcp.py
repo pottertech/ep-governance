@@ -18,6 +18,8 @@ from ep_governance.cli import app
 from ep_governance.db.postgres import create_engine, is_sqlite
 from ep_governance.db import run_migrations
 from ep_governance.db.repositories import PrincipalRepository
+from ep_governance.deployment import EnforcementCapability
+from ep_governance.errors import EPError
 from ep_governance.xid import XID
 
 runner = CliRunner()
@@ -118,7 +120,18 @@ class TestToolExposure:
 
 class TestServerCreation:
     def test_create_server_enforced(self, test_principal_id):
-        server = create_server("enforced", authenticated_principal_id=test_principal_id)
+        """create_server works in enforced mode with a valid capability."""
+        capability = EnforcementCapability(
+            effective_mode="enforced",
+            binding_enforcement_active=True,
+            agent_principal_id=test_principal_id,
+            verification_time="2026-01-01T00:00:00Z",
+        )
+        server = create_server(
+            "enforced",
+            authenticated_principal_id=test_principal_id,
+            enforcement_capability=capability,
+        )
         assert server.name == "ep-governance"
 
     def test_create_server_advisory(self, test_principal_id):
@@ -129,6 +142,57 @@ class TestServerCreation:
         """create_server must reject a missing authenticated_principal_id."""
         with pytest.raises(Exception):
             create_server("enforced")
+
+    # ------------------------------------------------------------------ #
+    # Enforcement capability boundary tests
+    # ------------------------------------------------------------------ #
+
+    def test_create_server_refuses_enforced_without_capability(self, test_principal_id):
+        """create_server must refuse enforced mode without an enforcement_capability."""
+        with pytest.raises(EPError):
+            create_server("enforced", authenticated_principal_id=test_principal_id)
+
+    def test_create_server_refuses_capability_agent_mismatch(self, test_principal_id):
+        """create_server must refuse when capability agent doesn't match the
+        authenticated principal."""
+        capability = EnforcementCapability(
+            effective_mode="enforced",
+            binding_enforcement_active=True,
+            agent_principal_id="some-other-agent-id",
+            verification_time="2026-01-01T00:00:00Z",
+        )
+        with pytest.raises(EPError):
+            create_server(
+                "enforced",
+                authenticated_principal_id=test_principal_id,
+                enforcement_capability=capability,
+            )
+
+    def test_create_server_works_with_valid_capability(self, test_principal_id):
+        """create_server works with a valid enforced capability whose agent
+        matches the authenticated principal."""
+        capability = EnforcementCapability(
+            effective_mode="enforced",
+            binding_enforcement_active=True,
+            agent_principal_id=test_principal_id,
+            verification_time="2026-01-01T00:00:00Z",
+        )
+        server = create_server(
+            "enforced",
+            authenticated_principal_id=test_principal_id,
+            enforcement_capability=capability,
+        )
+        assert server is not None
+        assert server.name == "ep-governance"
+
+    def test_create_server_advisory_without_capability_ok(self, test_principal_id):
+        """create_server allows advisory mode without an enforcement_capability."""
+        server = create_server(
+            "advisory",
+            authenticated_principal_id=test_principal_id,
+        )
+        assert server is not None
+        assert server.name == "ep-governance"
 
 
 class TestToolCalls:

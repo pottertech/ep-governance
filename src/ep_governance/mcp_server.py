@@ -86,6 +86,7 @@ def get_tools(mode: str = "enforced") -> list[Tool]:
 def create_server(
     mode: str = "enforced",
     authenticated_principal_id: str | None = None,
+    enforcement_capability: Any = None,
 ) -> Server:
     """Create an MCP server with EP-Governance tools.
 
@@ -93,12 +94,19 @@ def create_server(
         mode: 'enforced' or 'advisory'. In enforced mode, only ep_execute
               and governance management tools are exposed. In advisory mode,
               ep_check and all management tools are exposed.
+              This is derived from the enforcement_capability when provided.
         authenticated_principal_id: Principal XID of the authenticated caller.
               In production, this MUST come from the authenticated MCP session
               (TLS client certificate subject, API key identity, OAuth token
               subject, mTLS SPIFFE ID, etc.) — NOT from a constructor argument.
               The constructor argument is an interim convenience until a
               deployment-specific identity provider integration is wired in.
+        enforcement_capability: An EnforcementCapability object from
+              verify_deployment(). When provided, the server mode is
+              derived from the capability, and ep_execute requires
+              binding_enforcement_active. When None, the server refuses
+              to start in enforced mode (a capability is required for
+              enforced operation).
 
     The principal's type is NOT trusted from the caller.  It is loaded from
     the database on every tool invocation via :class:`PrincipalRepository`
@@ -110,6 +118,32 @@ def create_server(
             "this must be derived from the MCP session (TLS cert, API key, "
             "OAuth token), not passed by the caller."
         )
+
+    # When a capability is provided, derive mode from it and verify
+    # the capability's agent matches the authenticated principal.
+    if enforcement_capability is not None:
+        # Verify capability agent matches authenticated principal.
+        if enforcement_capability.agent_principal_id != authenticated_principal_id:
+            raise EPError(
+                "Enforcement capability agent_principal_id does not match "
+                "authenticated_principal_id. The capability must be bound "
+                "to the same agent that is being authenticated."
+            )
+        # Derive mode from capability.
+        mode = enforcement_capability.effective_mode
+        # In enforced mode, require binding enforcement to be active.
+        if mode == "enforced":
+            enforcement_capability.require_binding_enforcement()
+    else:
+        # No capability provided — refuse enforced mode.
+        if mode == "enforced":
+            raise EPError(
+                "create_server requires enforcement_capability for enforced mode. "
+                "Pass an EnforcementCapability from verify_deployment(). "
+                "Without a verified capability, the server cannot claim "
+                "binding enforcement."
+            )
+
     server: Server = Server("ep-governance")
 
     async def _list_tools(_request: Any) -> list[Tool]:
@@ -126,6 +160,7 @@ def create_server(
                 arguments,
                 mode,
                 authenticated_principal_id,
+                enforcement_capability,
             )
             return [TextContent(type="text", text=json.dumps(result, default=str))]
         except EPError as exc:
@@ -152,6 +187,7 @@ def _handle_tool_call(
     arguments: dict[str, Any],
     mode: str,
     authenticated_principal_id: str,
+    enforcement_capability: Any = None,
 ) -> dict[str, Any]:
     """Handle a tool call and return a result dict.
 
@@ -219,6 +255,10 @@ def _handle_tool_call(
         if name == "ep_check":
             return _ep_check(conn, arguments, authenticated_principal_id)
         elif name == "ep_execute":
+            # ep_execute requires binding enforcement to be active.
+            # This is the per-operation enforcement boundary.
+            if enforcement_capability is not None:
+                enforcement_capability.require_binding_enforcement()
             return _ep_execute(conn, arguments, authenticated_principal_id)
         elif name == "ep_status":
             return _ep_status(conn, arguments)
@@ -712,6 +752,7 @@ def _ep_audit_verify(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
 async def run_server(
     mode: str = "enforced",
     authenticated_principal_id: str | None = None,
+    enforcement_capability: Any = None,
 ) -> None:
     """Run the MCP server over stdio.
 
@@ -721,12 +762,18 @@ async def run_server(
     line.  The argument here is an interim bridge until that integration
     exists; callers must populate it from a trusted source.
 
+    ``enforcement_capability`` must be an EnforcementCapability from
+    verify_deployment(). It is required for enforced mode. When provided,
+    the server mode is derived from the capability and ep_execute checks
+    binding_enforcement_active on every call.
+
     The principal's type is loaded from the database at runtime, not trusted
     from the caller.
     """
     server = create_server(
         mode,
         authenticated_principal_id=authenticated_principal_id,
+        enforcement_capability=enforcement_capability,
     )
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())

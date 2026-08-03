@@ -306,6 +306,7 @@ class AuthorizationEngine:
         tool: str,
         payload_hash: str,
         matched_policies: list[dict[str, Any]],
+        enforcement_capability: Any = None,
     ) -> AuthorizationToken:
         """Issue a new signed authorization token.
 
@@ -320,11 +321,20 @@ class AuthorizationEngine:
             matched_policies:  List of policy dicts that matched the action.
                                Each dict should contain at least ``id`` and
                                ``activation_version`` (or ``version``).
+            enforcement_capability: Optional EnforcementCapability. When
+                               provided, require_binding_enforcement() is
+                               called before issuing the token. This ensures
+                               authorization issuance only happens when
+                               binding enforcement is verified active.
 
         Returns:
             A signed :class:`AuthorizationToken`.  The caller passes this
             to the agent, who passes it to the proxy.
         """
+        # Enforcement capability check at authorization issuance boundary.
+        if enforcement_capability is not None:
+            enforcement_capability.require_binding_enforcement()
+
         # 1. Generate identifiers and nonce.
         authorization_id = str(XID.new())
         nonce = os.urandom(32).hex()

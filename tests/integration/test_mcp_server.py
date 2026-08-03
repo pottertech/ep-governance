@@ -31,6 +31,8 @@ from ep_governance.db.repositories import (
     PrincipalRepository,
     ProjectRepository,
 )
+from ep_governance.deployment import EnforcementCapability
+from ep_governance.errors import EPError
 from ep_governance.mcp_server import create_server, get_tools
 from ep_governance.xid import XID
 
@@ -196,8 +198,18 @@ class TestServerCreation:
     """Test MCP server creation and authentication."""
 
     def test_create_server_enforced(self, agent_id):
-        """Server creation in enforced mode with authenticated principal."""
-        server = create_server("enforced", authenticated_principal_id=agent_id)
+        """Server creation in enforced mode with a valid capability."""
+        capability = EnforcementCapability(
+            effective_mode="enforced",
+            binding_enforcement_active=True,
+            agent_principal_id=agent_id,
+            verification_time="2026-01-01T00:00:00Z",
+        )
+        server = create_server(
+            "enforced",
+            authenticated_principal_id=agent_id,
+            enforcement_capability=capability,
+        )
         assert server is not None
 
     def test_create_server_advisory(self, agent_id):
@@ -213,9 +225,16 @@ class TestServerCreation:
     def test_create_server_with_principal_type(self, agent_id):
         """Server creation with explicit principal type (principal type is loaded
         from DB, not from constructor — just verify server works)."""
+        capability = EnforcementCapability(
+            effective_mode="enforced",
+            binding_enforcement_active=True,
+            agent_principal_id=agent_id,
+            verification_time="2026-01-01T00:00:00Z",
+        )
         server = create_server(
             "enforced",
             authenticated_principal_id=agent_id,
+            enforcement_capability=capability,
         )
         assert server is not None
 
@@ -288,7 +307,7 @@ class TestToolCalls:
     def test_ep_status_with_branch(self, engine, setup, agent_id):
         """ep_status should return branch state for a valid branch."""
         server = create_server(
-            "enforced",
+            "advisory",
             authenticated_principal_id=agent_id,
         )
         assert server is not None
@@ -296,7 +315,7 @@ class TestToolCalls:
     def test_ep_status_without_branch(self, agent_id):
         """ep_status without branch should return a message, not crash."""
         server = create_server(
-            "enforced",
+            "advisory",
             authenticated_principal_id=agent_id,
         )
         assert server is not None
@@ -304,7 +323,7 @@ class TestToolCalls:
     def test_ep_list_policies_empty(self, agent_id):
         """ep_list_policies on a fresh DB should return empty or default policies."""
         server = create_server(
-            "enforced",
+            "advisory",
             authenticated_principal_id=agent_id,
         )
         assert server is not None
@@ -312,7 +331,7 @@ class TestToolCalls:
     def test_ep_pending_approvals_empty(self, agent_id):
         """ep_pending_approvals with no pending requests should return empty."""
         server = create_server(
-            "enforced",
+            "advisory",
             authenticated_principal_id=agent_id,
         )
         assert server is not None
@@ -320,7 +339,7 @@ class TestToolCalls:
     def test_ep_audit_verify_empty_lattice(self, agent_id):
         """ep_audit_verify on an empty lattice should return valid (no events = valid)."""
         server = create_server(
-            "enforced",
+            "advisory",
             authenticated_principal_id=agent_id,
         )
         assert server is not None
@@ -328,7 +347,7 @@ class TestToolCalls:
     def test_unknown_tool_returns_error(self, agent_id):
         """Calling an unknown tool should return an error, not crash."""
         server = create_server(
-            "enforced",
+            "advisory",
             authenticated_principal_id=agent_id,
         )
         assert server is not None
@@ -344,7 +363,7 @@ class TestAuthenticationContext:
     def test_agent_cannot_approve(self, agent_id):
         """An agent principal type must not be able to approve transitions."""
         server = create_server(
-            "enforced",
+            "advisory",
             authenticated_principal_id=agent_id,
         )
         assert server is not None
@@ -352,7 +371,7 @@ class TestAuthenticationContext:
     def test_human_can_approve(self, human_id):
         """A human principal type should be allowed to approve transitions."""
         server = create_server(
-            "enforced",
+            "advisory",
             authenticated_principal_id=human_id,
         )
         assert server is not None

@@ -1314,6 +1314,7 @@ def serve(
     asyncio.run(run_server(
         mode=effective_mode,
         authenticated_principal_id=principal_id,
+        enforcement_capability=capability,
     ))
 
 
