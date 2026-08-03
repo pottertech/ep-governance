@@ -1128,6 +1128,12 @@ def serve(
         help="Path to the agent's complete tool manifest (from the orchestrator). "
              "REQUIRED in enforced mode — one tool name per line.",
     ),
+    unsafe_dev_service_identity: bool = typer.Option(
+        False, "--unsafe-dev-service-identity",
+        help="DANGEROUS: Use EP Service identity instead of an agent principal. "
+             "Only for development. Marks all events with the service identity. "
+             "Refused in enforced mode.",
+    ),
 ) -> None:
     """Start the MCP server.
 
@@ -1137,19 +1143,32 @@ def serve(
     ensuring the connected agent is identified as itself, not as the
     EP Service principal.
 
-    Before starting in enforced mode, the deployment verifier checks
-    isolation conditions and prints the enforcement report. If binding
-    enforcement is not active, the server prints a warning and operates
-    in advisory mode regardless of the EP_MODE setting.
+    An agent config is required in both enforced and advisory modes for
+    normal operation. The --unsafe-dev-service-identity flag bypasses
+    this requirement in advisory/dev mode only, using the EP Service
+    identity. This is explicitly marked as unsafe and refused in enforced
+    mode.
+
+    Before starting, the deployment verifier checks isolation conditions
+    and prints the enforcement report. If binding enforcement is not
+    active, the server prints a warning and operates in advisory mode.
     """
     import asyncio
     from .mcp_server import run_server
-    from .deployment import verify_deployment, format_enforcement_report
+    from .deployment import (
+        verify_deployment, format_enforcement_report,
+        verify_file_ownership, EnforcementCapability,
+    )
     cfg = load_config()
 
     # Load agent tool manifest (required in enforced mode).
     agent_tools: list[str] | None = None
     if agent_tools_file:
+        # Verify file ownership before reading.
+        ownership_check = verify_file_ownership(agent_tools_file)
+        if not ownership_check.passed:
+            typer.echo(f"ERROR: Agent tools file failed ownership check: {ownership_check.evidence}", err=True)
+            raise typer.Exit(1)
         try:
             with open(agent_tools_file) as f:
                 agent_tools = [line.strip() for line in f if line.strip() and not line.startswith("#")]
@@ -1178,9 +1197,7 @@ def serve(
     # Use the effective mode (may be downgraded from enforced to advisory).
     effective_mode = deployment_status.effective_mode
 
-    # Load the agent principal identity from a root-owned config file.
-    # This binds the launcher to a specific agent, NOT to the EP Service.
-    # The EP Service identity is reserved for internal governance operations.
+    # Load the agent principal identity.
     import sqlalchemy as _sa
     engine = _sa.create_engine(cfg.db_url) if not cfg.db_schema else None
     if engine is None:
@@ -1190,13 +1207,19 @@ def serve(
     principal_id: str | None = None
 
     if agent_config:
+        # Verify file ownership before reading.
+        ownership_check = verify_file_ownership(agent_config)
+        if not ownership_check.passed:
+            typer.echo(f"ERROR: Agent config failed ownership check: {ownership_check.evidence}", err=True)
+            raise typer.Exit(1)
+
         # Load agent principal ID from root-owned config file.
         import tomllib
         try:
             with open(agent_config, "rb") as f:
                 agent_cfg = tomllib.load(f)
             principal_id = agent_cfg.get("principal_id")
-            principal_name = agent_cfg.get("name", "unknown")
+            config_name = agent_cfg.get("name", "")
         except FileNotFoundError:
             typer.echo(f"ERROR: Agent config file not found: {agent_config}", err=True)
             raise typer.Exit(1)
@@ -1206,8 +1229,7 @@ def serve(
 
         if not principal_id:
             typer.echo(
-                f"ERROR: Agent config {agent_config} does not contain 'principal_id'. "
-                f"The config must map this launcher to a specific agent principal.",
+                f"ERROR: Agent config {agent_config} does not contain 'principal_id'.",
                 err=True,
             )
             raise typer.Exit(1)
@@ -1224,26 +1246,33 @@ def serve(
         if row[1] != "agent":
             typer.echo(
                 f"ERROR: Principal {principal_id} is type '{row[1]}', not 'agent'. "
-                f"The launcher must bind to an agent principal, not a service or human.",
+                f"The launcher must bind to an agent principal.",
+                err=True,
+            )
+            raise typer.Exit(1)
+        # Verify config name matches database name (consistency check).
+        if config_name and config_name != row[2]:
+            typer.echo(
+                f"ERROR: Agent config name '{config_name}' does not match "
+                f"database principal name '{row[2]}'. Possible config tampering.",
                 err=True,
             )
             raise typer.Exit(1)
         typer.echo(f"Agent principal: {row[2]} ({principal_id})")
-    else:
-        # No agent config provided — this is only allowed in advisory/dev mode.
+
+    elif unsafe_dev_service_identity:
+        # Explicitly unsafe development fallback.
         if effective_mode == "enforced":
             typer.echo(
-                "ERROR: --agent-config is required in enforced mode. "
-                "The launcher must bind to a specific agent principal via a "
-                "root-owned configuration file. The EP Service identity is "
-                "reserved for internal governance operations.",
+                "ERROR: --unsafe-dev-service-identity is refused in enforced mode. "
+                "Use --agent-config to bind to a specific agent principal.",
                 err=True,
             )
             raise typer.Exit(1)
-        # In advisory mode, fall back to EP Service for compatibility.
         typer.echo(
-            "WARNING: No --agent-config provided. Using EP Service identity. "
-            "This is only acceptable in advisory mode.",
+            "WARNING: Using EP Service identity (--unsafe-dev-service-identity). "
+            "This is for development only. All events will be attributed to "
+            "EP Service, not to a specific agent.",
             err=True,
         )
         with engine.connect() as _conn:
@@ -1255,6 +1284,21 @@ def serve(
         if not principal_id:
             typer.echo("ERROR: EP Service principal not found. Run 'ep-governance init' first.")
             raise typer.Exit(1)
+    else:
+        # No agent config and no unsafe flag — require agent config.
+        typer.echo(
+            "ERROR: --agent-config is required. The launcher must bind to a "
+            "specific agent principal via a root-owned configuration file. "
+            "For development only, use --unsafe-dev-service-identity.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
+    # Build the enforcement capability for passing into services.
+    capability = EnforcementCapability.from_status(
+        status=deployment_status,
+        agent_principal_id=principal_id,
+    )
 
     # HTTP mode requires transport authentication (not yet implemented).
     if http:

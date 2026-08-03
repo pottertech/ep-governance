@@ -32,8 +32,10 @@ Three sources of verification:
 
 from __future__ import annotations
 
+import json
 import os
 import socket
+import stat
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -50,6 +52,8 @@ __all__ = [
     "check_runtime_environment",
     "check_agent_tool_manifest",
     "format_enforcement_report",
+    "verify_file_ownership",
+    "EnforcementCapability",
 ]
 
 
@@ -221,6 +225,152 @@ _ASSERTION_VARS = {
     "target_network_restricted_to_proxy": "EP_ASSERT_TARGET_NETWORK_ISOLATED",
     "proxy_health_verified": "EP_ASSERT_PROXY_HEALTH_VERIFIED",
 }
+
+
+# --------------------------------------------------------------------------- #
+# File ownership verification
+# --------------------------------------------------------------------------- #
+
+
+def verify_file_ownership(
+    path: str,
+    require_uid: int = 0,
+    reject_symlinks: bool = True,
+    reject_group_writable: bool = True,
+    reject_world_writable: bool = True,
+) -> IsolationCheck:
+    """Verify that a file is owned by a trusted user and has safe permissions.
+
+    This is used to verify that agent configuration files and tool manifest
+    files are root-owned and not writable by the agent or other untrusted
+    users.
+
+    Args:
+        path: File path to check.
+        require_uid: Required owner UID (default 0 = root).
+        reject_symlinks: If True, reject symlinks.
+        reject_group_writable: If True, reject group-writable files.
+        reject_world_writable: If True, reject world-writable files.
+
+    Returns:
+        IsolationCheck with passed=True if the file is safe, False otherwise.
+    """
+    if not os.path.exists(path):
+        return IsolationCheck(
+            name=f"file_ownership:{path}",
+            passed=False,
+            evidence=f"File not found: {path}",
+        )
+
+    try:
+        # Use lstat to detect symlinks without following them
+        st = os.lstat(path)
+
+        # Reject symlinks
+        if reject_symlinks and stat.S_ISLNK(st.st_mode):
+            return IsolationCheck(
+                name=f"file_ownership:{path}",
+                passed=False,
+                evidence=f"File is a symlink: {path} — symlinks are not trusted",
+            )
+
+        # Check owner UID
+        if st.st_uid != require_uid:
+            return IsolationCheck(
+                name=f"file_ownership:{path}",
+                passed=False,
+                evidence=(
+                    f"File owner UID is {st.st_uid}, expected {require_uid}: {path}"
+                ),
+            )
+
+        # Check permissions
+        mode = st.st_mode
+        if reject_group_writable and (mode & stat.S_IWGRP):
+            return IsolationCheck(
+                name=f"file_ownership:{path}",
+                passed=False,
+                evidence=f"File is group-writable: {path}",
+            )
+
+        if reject_world_writable and (mode & stat.S_IWOTH):
+            return IsolationCheck(
+                name=f"file_ownership:{path}",
+                passed=False,
+                evidence=f"File is world-writable: {path}",
+            )
+
+        return IsolationCheck(
+            name=f"file_ownership:{path}",
+            passed=True,
+            evidence=f"File owned by UID {require_uid}, permissions OK: {path}",
+        )
+    except OSError as exc:
+        return IsolationCheck(
+            name=f"file_ownership:{path}",
+            passed=False,
+            evidence=f"Cannot stat file: {exc}",
+        )
+
+
+# --------------------------------------------------------------------------- #
+# Enforcement capability (for passing verified status into services)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class EnforcementCapability:
+    """A verified enforcement capability that can be passed to services.
+
+    This represents the result of deployment verification in a form that
+    can be required by create_server(), ep_execute, authorization issuance,
+    and proxy execution.
+
+    The capability is immutable and carries the enforcement status so that
+    each component can independently verify that binding enforcement is
+    active without re-running the full deployment check.
+
+    Attributes:
+        effective_mode: The verified effective mode ("enforced" or "advisory").
+        binding_enforcement_active: Whether binding enforcement is active.
+        agent_principal_id: The agent principal this capability is bound to.
+        verification_time: When the deployment was verified.
+        failure_reasons: Why enforcement is not active (if applicable).
+    """
+
+    effective_mode: str
+    binding_enforcement_active: bool
+    agent_principal_id: str
+    verification_time: str
+    failure_reasons: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_status(
+        cls,
+        status: EnforcementStatus,
+        agent_principal_id: str,
+    ) -> EnforcementCapability:
+        """Create a capability from an EnforcementStatus."""
+        return cls(
+            effective_mode=status.effective_mode,
+            binding_enforcement_active=status.binding_enforcement_active,
+            agent_principal_id=agent_principal_id,
+            verification_time=datetime.now(UTC).isoformat(),
+            failure_reasons=status.reasons if not status.binding_enforcement_active else [],
+        )
+
+    def require_binding_enforcement(self) -> None:
+        """Raise EnforcementUnavailableError if binding enforcement is not active.
+
+        This is the method that authorization issuance, ep_execute, and proxy
+        execution should call before performing governed operations.
+        """
+        if not self.binding_enforcement_active:
+            reasons = "; ".join(self.failure_reasons) if self.failure_reasons else "unknown"
+            raise EnforcementUnavailableError(
+                f"Binding enforcement is not active (effective mode: "
+                f"{self.effective_mode}). Reasons: {reasons}"
+            )
 
 
 # --------------------------------------------------------------------------- #
@@ -401,8 +551,6 @@ def check_agent_tool_manifest(
 
 def _load_attestation_from_env(env: Mapping[str, str] | None = None) -> EnforcementAttestation:
     """Load deployment assertions from environment variables.
-
-    These are EP_ASSERT_* variables set by the orchestrator.  They are
     weak alone (an agent could set them) but useful when combined with
     runtime checks.
     """
@@ -465,6 +613,12 @@ def verify_deployment(
     Returns:
         EnforcementStatus with effective_mode, checks, and reasons.
     """
+    # Validate requested_mode
+    if requested_mode not in ("enforced", "advisory"):
+        raise ValueError(
+            f"requested_mode must be 'enforced' or 'advisory', got '{requested_mode}'"
+        )
+
     # Load attestation from env if not provided explicitly
     if attestation is None:
         attestation = _load_attestation_from_env(env)
