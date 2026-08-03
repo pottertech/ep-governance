@@ -37,7 +37,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from ep_governance.authorizations import AuthorizationEngine, KeyManager, AuthorizationToken
 from ep_governance.branches import BranchCommitter
 from ep_governance.canonical import canonical_hash
-from ep_governance.config import load_config
+from ep_governance.config import load_config, OperatingMode
 from ep_governance.db.postgres import create_engine
 from ep_governance.db.repositories import PolicyRepository, BranchRepository, TransitionRepository
 from ep_governance.policies import Policy
@@ -196,6 +196,29 @@ def _load_policy_engine(engine, branch_id: str) -> PolicyEngine | None:
 
 def main() -> None:
     cfg = load_config()
+
+    # Production enforcement: the proxy refuses to start in advisory mode.
+    # Advisory mode is only available in development (EP_DEV=true).
+    if cfg.mode == OperatingMode.ADVISORY:
+        if not cfg.dev:
+            print(
+                "FATAL: Proxy cannot start in advisory mode in production. "
+                "Set EP_MODE=enforced.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if not cfg.allow_advisory_execution:
+            print(
+                "FATAL: Proxy cannot start in advisory mode without "
+                "EP_ALLOW_ADVISORY_EXECUTION=true.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        print(
+            "WARNING: Proxy starting in advisory mode (development). "
+            "Production deployments must use EP_MODE=enforced.",
+            file=sys.stderr,
+        )
 
     # Required environment variables
     target_url = os.environ.get("EP_PROXY_TARGET_URL", "")

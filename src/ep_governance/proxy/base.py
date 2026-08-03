@@ -172,6 +172,45 @@ class GovernedProxy(ABC):
                 completed_at=self._now_iso(),
             )
 
+        # Step 4.5: Verify transition is in the expected stage.
+        #
+        # The transition must be in the 'authorized' stage (i.e., the EP
+        # service has issued a token and is waiting for proxy execution).
+        # If the transition is in any other stage (proposed, executing,
+        # succeeded, failed, cancelled, expired, execution_uncertain),
+        # the proxy must refuse execution — the authorization is stale or
+        # the transition has already been handled.
+        if self.transition_engine is not None and token.transition_id:
+            pre_transition = self.transition_engine.get_transition(
+                token.transition_id,
+            )
+            if pre_transition is None:
+                return ExecutionResult(
+                    success=False,
+                    exit_status="failure",
+                    result_summary=(
+                        f"Transition {token.transition_id} not found — "
+                        "cannot verify stage"
+                    ),
+                    execution_attempt_id=attempt_id,
+                    started_at=started_at,
+                    completed_at=self._now_iso(),
+                )
+            pre_stage = pre_transition.get("stage", "")
+            if pre_stage != "authorized":
+                return ExecutionResult(
+                    success=False,
+                    exit_status="failure",
+                    result_summary=(
+                        f"Transition is in stage '{pre_stage}', "
+                        "expected 'authorized' — authorization is stale "
+                        "or already consumed"
+                    ),
+                    execution_attempt_id=attempt_id,
+                    started_at=started_at,
+                    completed_at=self._now_iso(),
+                )
+
         # Step 5+6: Policy revalidation AND atomic claim in a single
         # SERIALIZABLE transaction (Critical fix 2 — TOCTOU race).
         #

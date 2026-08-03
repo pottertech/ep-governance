@@ -42,7 +42,7 @@ Where the two conflict, v1.1.1 governs.
 ## What EP-Governance Does Not Do
 
 - Does not provide cryptographic guarantees against a determined adversary with database access
-- Does not prevent an agent from bypassing governance in advisory mode
+- Does not allow advisory mode in production (rejected at config load time)
 - Does not enforce real compute quotas (BT is a planning budget)
 - Does not store operational target credentials (those belong to the proxy)
 - Does not replace human judgment for novel situations
@@ -70,6 +70,11 @@ To achieve binding enforcement (not merely advisory):
 4. Configure network policy so only the proxy can reach sensitive services.
 5. Expose only `ep_execute` and governance management tools to the agent.
 6. Do not expose raw shell, database, email, Docker, or Git tools to the agent.
+7. Lock down the agent runtime (read-only root FS, no credential mounts, non-root, dropped capabilities).
+8. Protect the launcher and configuration from agent modification (read-only mounts, admin-owned files).
+9. Use narrowly-scoped proxies with least-privilege credentials (separate read-only, write, email, deployment proxies).
+10. Run bypass detection reconciliation (target activity log vs EP audit log).
+11. In production, advisory mode is rejected at config load time. Set `EP_MODE=enforced`, `EP_ALLOW_ADVISORY_EXECUTION=false`, `EP_REQUIRE_SIGNED_AUTHORIZATION=true`, `EP_FAIL_CLOSED=true`.
 
 Without these deployment measures, EP-Governance operates in advisory mode regardless of the `EP_MODE=enforced` setting. See [Enforced Mode Deployment](docs/deployment/enforced-mode.md) for a complete guide.
 
@@ -83,16 +88,16 @@ Without these deployment measures, EP-Governance operates in advisory mode regar
 
 | Item | Value |
 |------|-------|
-| Tested commit | `85056c4` (July 31, 2026) |
+| Tested commit | pending (this commit) |
 | Python | 3.12+ |
 | PostgreSQL | 17 (Docker container for PG integration tests) |
 | SQLite | Built-in (default for unit/property/contract tests) |
-| Total tests collected | 984 |
-| Test results (without PG) | 973 passed, 11 skipped |
+| Total tests collected | 1010 |
+| Test results (without PG) | 999 passed, 11 skipped |
 | PG integration tests | 10 (skipped without `EP_TEST_DB_URL`; pass with it set) |
 | 11th skip | `test_pg_migration_uses_transactional_ddl` (requires PostgreSQL, not just `EP_TEST_DB_URL`) |
 | E2e tests | 4 (standalone scripts, run against live PostgreSQL) |
-| Test categories | unit (414), property (38), contract (298), integration (154), security (76), concurrency (4) |
+| Test categories | unit (418), property (38), contract (298), integration (154), security (99), concurrency (4) |
 | Duration | ~29 seconds (SQLite), ~55 seconds (with PG integration) |
 | Skipped tests | PostgreSQL-only tests that require `EP_TEST_DB_URL` environment variable |
 | PG integration tests | Set `EP_TEST_DB_URL=postgresql://user:pass@host:port/db` and run `pytest tests/integration/test_pg_integration.py` |

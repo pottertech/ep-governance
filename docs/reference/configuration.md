@@ -10,7 +10,7 @@ This page lists every supported environment variable, grouped by the component t
 
 | Component | Variables |
 |-----------|-----------|
-| **Service** (core governance daemon) | `EP_MODE`, `EP_DB_URL`, `EP_DB_SCHEMA`, `EP_NOTIFY`, `EP_NATS_URL`, `EP_TOKEN_TTL_SECONDS`, `EP_DEV`, `EP_BOOTSTRAP_TOKEN_HASH`, `EP_SIGNING_KEY_FILE` |
+| **Service** (core governance daemon) | `EP_MODE`, `EP_DB_URL`, `EP_DB_SCHEMA`, `EP_NOTIFY`, `EP_NATS_URL`, `EP_TOKEN_TTL_SECONDS`, `EP_DEV`, `EP_BOOTSTRAP_TOKEN_HASH`, `EP_SIGNING_KEY_FILE`, `EP_ALLOW_ADVISORY_EXECUTION`, `EP_REQUIRE_SIGNED_AUTHORIZATION`, `EP_FAIL_CLOSED` |
 | **Embedding** (used by Service & MCP) | `EP_EMBEDDING_PROVIDER`, `EP_EMBEDDING_MODEL`, `EP_EMBEDDING_HOST`, `EP_EMBEDDING_API_KEY` |
 | **MCP Server** | `EP_MCP_TRANSPORT`, `EP_MCP_PORT`, `EP_MCP_TLS_CERT`, `EP_MCP_TLS_KEY`, `EP_MCP_ALLOWED_HOSTS`, `EP_BOOTSTRAP_MODE` |
 | **Proxy** | `EP_PROXY_TARGET_URL`, `EP_PROXY_AUDIENCE`, `EP_PROXY_PORT`, `EP_PUBLIC_KEY`, `EP_EP_SERVICE_ID` |
@@ -33,6 +33,9 @@ These are loaded by `load_config()` and consumed by the core EP-Governance servi
 | `EP_DEV` | no | `false` | no | Development-mode flag. Set to `true`, `1`, or `yes` to enable. |
 | `EP_BOOTSTRAP_TOKEN_HASH` | no | *(none)* | yes | SHA-256 hash of the bootstrap token. When set, the CLI bootstrap flow verifies the supplied plaintext token against this hash. |
 | `EP_SIGNING_KEY_FILE` | no | *(none)* | yes | Filesystem path to the Ed25519 private signing key (32 raw bytes, mode 0600). Used by the EP service to sign authorization tokens. In production, prefer Docker secrets, systemd credentials, or Vault over a plaintext file. |
+| `EP_ALLOW_ADVISORY_EXECUTION` | no | `false` | no | When `true`, allows advisory mode in development. Advisory mode is always rejected in production (when `EP_DEV` is not set). |
+| `EP_REQUIRE_SIGNED_AUTHORIZATION` | no | `true` | no | When `true`, all consequential actions require Ed25519-signed authorization tokens. Should always be `true` in production. |
+| `EP_FAIL_CLOSED` | no | `true` | no | When `true`, the proxy refuses to execute if governance is unavailable. Should always be `true` in production. |
 
 ---
 
@@ -127,6 +130,9 @@ Which variables each component requires or optionally reads:
 | `EP_PUBLIC_KEY` | | ✅ (req) | | |
 | `EP_EP_SERVICE_ID` | | ✅ (req) | | |
 | `EP_SIGNING_KEY_FILE` | ✅ | | | ✅ |
+| `EP_ALLOW_ADVISORY_EXECUTION` | ✅ | ✅ | | ✅ |
+| `EP_REQUIRE_SIGNED_AUTHORIZATION` | ✅ | ✅ | | |
+| `EP_FAIL_CLOSED` | ✅ | ✅ | | |
 | `EP_BOOTSTRAP_TOKEN` | | | | ✅ |
 
 ✅ = read by the component. **(req)** = required (no usable default).

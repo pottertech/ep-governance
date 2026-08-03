@@ -327,13 +327,17 @@ class TestProxyTokenVerification:
         conn.commit()
         assert result1.success is True
 
-        # Second execution with same token fails
+        # Second execution with same token fails — either because the
+        # token is already claimed, or because the transition has moved
+        # out of the 'authorized' stage (the new pre-execution stage
+        # check catches this before the claim attempt).
         result2 = proxy.execute(signed, payload, key_manager.public_key)
         conn.commit()
         assert result2.success is False
         assert (
             "already used" in result2.result_summary.lower()
             or "claim failed" in result2.result_summary.lower()
+            or "expected 'authorized'" in result2.result_summary.lower()
         )
 
     def test_wrong_audience_rejected(

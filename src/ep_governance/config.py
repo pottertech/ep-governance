@@ -64,6 +64,10 @@ class Config:
     dev: bool = False
     bootstrap_token_hash: str | None = None
     signing_key_file: str | None = None
+    # Production enforcement flags (enforced-mode hardening)
+    allow_advisory_execution: bool = False
+    require_signed_authorization: bool = True
+    fail_closed: bool = True
 
 
 def load_config(env: dict[str, str] | None = None) -> Config:
@@ -107,6 +111,32 @@ def load_config(env: dict[str, str] | None = None) -> Config:
 
     dev = e.get("EP_DEV", "").lower() in ("true", "1", "yes")
 
+    # Production enforcement flags
+    allow_advisory = e.get("EP_ALLOW_ADVISORY_EXECUTION", "false").lower() in (
+        "true", "1", "yes",
+    )
+    require_signed = e.get("EP_REQUIRE_SIGNED_AUTHORIZATION", "true").lower() in (
+        "true", "1", "yes",
+    )
+    fail_closed = e.get("EP_FAIL_CLOSED", "true").lower() in (
+        "true", "1", "yes",
+    )
+
+    # In production (dev=false), advisory mode must be rejected entirely.
+    # Advisory mode can only be used when EP_DEV=true and
+    # EP_ALLOW_ADVISORY_EXECUTION=true.
+    if mode == OperatingMode.ADVISORY and not dev:
+        raise ConfigError(
+            "Advisory mode is not permitted in production. "
+            "Set EP_MODE=enforced, or set EP_DEV=true and "
+            "EP_ALLOW_ADVISORY_EXECUTION=true for development."
+        )
+    if mode == OperatingMode.ADVISORY and dev and not allow_advisory:
+        raise ConfigError(
+            "Advisory mode requires EP_ALLOW_ADVISORY_EXECUTION=true "
+            "even in development."
+        )
+
     return Config(
         mode=mode,
         db_url=db_url,
@@ -126,4 +156,7 @@ def load_config(env: dict[str, str] | None = None) -> Config:
         dev=dev,
         bootstrap_token_hash=e.get("EP_BOOTSTRAP_TOKEN_HASH") or None,
         signing_key_file=e.get("EP_SIGNING_KEY_FILE") or None,
+        allow_advisory_execution=allow_advisory,
+        require_signed_authorization=require_signed,
+        fail_closed=fail_closed,
     )

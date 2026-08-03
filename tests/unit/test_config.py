@@ -33,10 +33,46 @@ class TestLoadConfig:
             {
                 "EP_MODE": "advisory",
                 "EP_DB_URL": "sqlite:///./test.db",
+                "EP_DEV": "true",
+                "EP_ALLOW_ADVISORY_EXECUTION": "true",
             }
         )
         assert cfg.mode == "advisory"
         assert cfg.db_url == "sqlite:///./test.db"
+        assert cfg.allow_advisory_execution is True
+
+    def test_advisory_rejected_in_production(self):
+        """Advisory mode must be rejected when EP_DEV is not set."""
+        with pytest.raises(ConfigError, match="not permitted in production"):
+            load_config(
+                {
+                    "EP_MODE": "advisory",
+                    "EP_DB_URL": "sqlite:///./test.db",
+                }
+            )
+
+    def test_advisory_rejected_without_allow_flag(self):
+        """Advisory mode requires EP_ALLOW_ADVISORY_EXECUTION even in dev."""
+        with pytest.raises(ConfigError, match="requires EP_ALLOW_ADVISORY_EXECUTION"):
+            load_config(
+                {
+                    "EP_MODE": "advisory",
+                    "EP_DB_URL": "sqlite:///./test.db",
+                    "EP_DEV": "true",
+                }
+            )
+
+    def test_production_enforcement_flags_default(self):
+        """Production flags default to secure values."""
+        cfg = load_config(
+            {
+                "EP_MODE": "enforced",
+                "EP_DB_URL": "sqlite:///./test.db",
+            }
+        )
+        assert cfg.allow_advisory_execution is False
+        assert cfg.require_signed_authorization is True
+        assert cfg.fail_closed is True
 
     def test_missing_db_url_raises(self):
         with pytest.raises(ConfigError):

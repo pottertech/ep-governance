@@ -66,8 +66,8 @@ ep-governance check \
 
 ## Operating modes
 
-- Enforced (current): consequential tools available only through ep_execute via the governed proxy. Ed25519-signed authorization tokens, atomic claims, payload verification, credential isolation.
-- Advisory: agent calls ep_check before actions. No enforcement.
+- Enforced (current): consequential tools available only through ep_execute via the governed proxy. Ed25519-signed authorization tokens, atomic claims, payload verification, credential isolation. Advisory mode is rejected in production (config load time).
+- Advisory: agent calls ep_check before actions. No enforcement. Only available in development (EP_DEV=true + EP_ALLOW_ADVISORY_EXECUTION=true).
 
 ## Enforced mode pipeline
 
@@ -83,12 +83,13 @@ The full execution path in enforced mode:
 7. Agent sends token + payload to governed proxy
 8. Proxy verifies token signature (Ed25519 public key)
 9. Proxy computes payload hash from actual payload, verifies match
-10. Proxy revalidates current policy state (stale authorization detection)
-11. Proxy atomically claims token (single UPDATE...WHERE used=FALSE...RETURNING)
-12. Proxy executes using its own credentials (agent never sees target credentials)
-13. On success: EP creates graph node, advances branch head, appends audit event
-14. On failure: EP records failure, no node created
-15. On timeout: EP marks execution_uncertain for manual reconciliation
+10. Proxy verifies transition is in 'authorized' stage (stale authorization guard)
+11. Proxy revalidates current policy state (stale authorization detection)
+12. Proxy atomically claims token (single UPDATE...WHERE used=FALSE...RETURNING)
+13. Proxy executes using its own credentials (agent never sees target credentials)
+14. On success: EP creates graph node, advances branch head, appends audit event
+15. On failure: EP records failure, no node created
+16. On timeout: EP marks execution_uncertain for manual reconciliation
 
 ## Verified test results (July 30, 2026)
 

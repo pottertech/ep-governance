@@ -13,6 +13,9 @@ services:
       EP_DB_URL: "${EP_DB_URL}"
       EP_DB_SCHEMA: ep_governance
       EP_MODE: enforced
+      EP_ALLOW_ADVISORY_EXECUTION: "false"
+      EP_REQUIRE_SIGNED_AUTHORIZATION: "true"
+      EP_FAIL_CLOSED: "true"
 
       # Target DB (what the proxy executes against)
       EP_PROXY_TARGET_URL: "${EP_PROXY_TARGET_URL}"
