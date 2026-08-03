@@ -39,13 +39,40 @@ Where the two conflict, v1.1.1 governs.
 - Supports multi-agent concurrency with optimistic branch-head locking
 - Exports signed, versioned transfer packages for model switching
 
-## What EP-Governance Does Not Do
+## Security Boundaries and Responsibilities Outside EP-Governance
 
-- Does not provide cryptographic guarantees against a determined adversary with database access
-- Does not allow advisory mode in production (rejected at config load time)
-- Does not enforce real compute quotas (BT is a planning budget)
-- Does not store operational target credentials (those belong to the proxy)
-- Does not replace human judgment for novel situations
+EP-Governance is the **decision and accountability layer**. Several capabilities are intentionally delegated to other layers rather than omitted.
+
+### Tamper evidence vs. database administrator
+
+EP-Governance uses Ed25519 signatures, payload hashes, single-use authorization tokens, and hash-chained audit records to detect tampering and prove internal consistency. This provides tamper evidence under its stated trust model — not cryptographic guarantees against an adversary who controls the database, application, and keys. Stronger guarantees require external trust anchors: HSM-held signing keys, audit checkpoints published to immutable external storage, append-only WORM logging, remote transparency logs, independent timestamping, or replicas controlled by different administrators.
+
+### Advisory mode is for development only
+
+Advisory mode tells the agent what it should do but does not place EP-Governance in the execution path. An agent can ignore the recommendation and act directly. Advisory mode is available only in development (EP_DEV=true + EP_ALLOW_ADVISORY_EXECUTION=true) and is rejected at config load time in production. Actual prevention requires enforced mode, where the agent lacks direct access to the operational target and must go through an EP-controlled proxy.
+
+### BT is a planning budget, not a compute quota
+
+EP-Governance can assign a proposed action a budget value and reject actions that exceed the planned allowance. It cannot measure or enforce actual CPU, GPU, RAM, API tokens, network bandwidth, storage I/O, or cloud spending. Real enforcement requires infrastructure-specific controls: Linux cgroups, Kubernetes resource limits, Docker constraints, cloud-provider budget APIs, LLM token metering, database statement limits, process timeouts, network quotas, GPU schedulers.
+
+### Operational credentials belong to proxies, not EP-Governance
+
+EP-Governance decides whether an action is authorized. It does not store database passwords, API keys, SSH keys, cloud credentials, or service tokens. Each proxy holds the minimum credential needed for its category of action. This prevents the governance database from becoming a high-value centralized secrets vault. In production, proxies should obtain credentials from Vault, AWS Secrets Manager, Azure Key Vault, Google Secret Manager, an HSM, workload identity, or short-lived credentials.
+
+### Human judgment for novel situations
+
+Policies work well when conditions can be represented in advance. They are less reliable when the situation is unprecedented, consequences are unclear, policies conflict, context is missing, or ethical/legal interpretation is required. EP-Governance can deny known-dangerous actions, require approval, preserve evidence, enforce separation of duties, detect policy conflicts, and route uncertainty to humans. It cannot guarantee good judgment in every novel circumstance. Uncertainty should produce escalation, not a false claim that the policy engine can resolve every situation.
+
+### Layered architecture
+
+```text
+EP-Governance          — determines permission, records governance state
+Trusted proxies        — enforce approved actions, hold target credentials
+Infrastructure         — enforces CPU, memory, network, storage, process limits
+Secret manager         — protects operational credentials
+External audit anchor  — protects against database-level tampering
+Human reviewers        — resolve novelty, ambiguity, ethics, exceptional risk
+```
 
 ## Installation
 
