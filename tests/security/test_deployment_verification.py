@@ -113,7 +113,7 @@ def test_enforced_mode_no_attestation_downgrades_to_advisory(monkeypatch):
 def test_enforced_mode_all_checks_pass_stays_enforced(monkeypatch):
     """Full attestation + clean env + no raw tools -> effective enforced."""
     _mock_no_files(monkeypatch)
-    monkeypatch.setattr("ep_governance.deployment._check_proxy_health", lambda url: True)
+    monkeypatch.setattr("ep_governance.deployment._check_proxy_health", lambda url, **kwargs: True)
     status = verify_deployment(
         "enforced",
         env=_clean_env(),
@@ -194,7 +194,7 @@ def test_raw_tools_in_manifest_force_advisory(monkeypatch, raw_tool):
 def test_clean_manifest_only_governed_tools_passes(monkeypatch):
     """A manifest containing only ep_* tools passes the tool check."""
     _mock_no_files(monkeypatch)
-    monkeypatch.setattr("ep_governance.deployment._check_proxy_health", lambda url: True)
+    monkeypatch.setattr("ep_governance.deployment._check_proxy_health", lambda url, **kwargs: True)
     tools = ["ep_execute", "ep_check", "ep_status", "ep_log", "ep_audit"]
     status = verify_deployment(
         "enforced",
@@ -275,7 +275,7 @@ def test_format_enforcement_report_contains_key_sections(monkeypatch):
 def test_format_enforcement_report_enforced_mode_says_active(monkeypatch):
     """When binding enforcement is active, the report says so."""
     _mock_no_files(monkeypatch)
-    monkeypatch.setattr("ep_governance.deployment._check_proxy_health", lambda url: True)
+    monkeypatch.setattr("ep_governance.deployment._check_proxy_health", lambda url, **kwargs: True)
     status = verify_deployment(
         "enforced",
         env=_clean_env(),
@@ -659,7 +659,7 @@ def test_verify_deployment_explicit_attestation_overrides_env(monkeypatch):
 def test_verify_deployment_loads_attestation_from_env(monkeypatch):
     """When no explicit attestation, EP_ASSERT_* vars are used."""
     _mock_no_files(monkeypatch)
-    monkeypatch.setattr("ep_governance.deployment._check_proxy_health", lambda url: True)
+    monkeypatch.setattr("ep_governance.deployment._check_proxy_health", lambda url, **kwargs: True)
     env = dict(_clean_env())
     env.update({var: "true" for var in _ASSERTION_VARS.values()})
     status = verify_deployment(

@@ -14,7 +14,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from datetime import UTC, datetime, timedelta
+
 
 import pytest
 import sqlalchemy as sa
@@ -40,6 +40,7 @@ from ep_governance.policies import Policy
 from ep_governance.policy_engine import PolicyEngine
 from ep_governance.transitions import TransitionEngine
 from ep_governance.xid import XID
+from ep_governance.deployment import EnforcementCapability
 
 
 def _get_db_url() -> str:
@@ -180,6 +181,9 @@ class TestProxyCrashRecovery:
 
         # Issue token and claim it (simulating proxy starting execution)
         payload_hash = "sha256:" + canonical_hash({"sql": "SELECT 1"})
+        capability = EnforcementCapability.for_test(
+            agent_principal_id=agent_id,
+        )
         token = auth_engine.issue_authorization(
             transition_id=transition["id"],
             agent_id=agent_id,
@@ -189,6 +193,7 @@ class TestProxyCrashRecovery:
             tool="postgres.execute",
             payload_hash=payload_hash,
             matched_policies=[],
+            enforcement_capability=capability,
         )
         signed = token.to_signed_token(km)
         conn.commit()
@@ -294,6 +299,9 @@ class TestKeyRotationDuringActiveTokens:
             pytest.skip("Transition did not reach authorized")
 
         payload_hash = "sha256:" + canonical_hash({"sql": "SELECT 1"})
+        capability = EnforcementCapability.for_test(
+            agent_principal_id=agent_id,
+        )
         token = auth_engine_old.issue_authorization(
             transition_id=transition["id"],
             agent_id=agent_id,
@@ -303,6 +311,7 @@ class TestKeyRotationDuringActiveTokens:
             tool="postgres.execute",
             payload_hash=payload_hash,
             matched_policies=[],
+            enforcement_capability=capability,
         )
         signed_old = token.to_signed_token(km_old)
         conn.commit()
@@ -401,6 +410,9 @@ class TestStaleAuthorizationAfterPolicyChange:
         # should detect the mismatch. This simulates a policy change
         # between authorization and execution.
         payload_hash = "sha256:" + canonical_hash({"sql": "SELECT 1"})
+        capability = EnforcementCapability.for_test(
+            agent_principal_id=agent_id,
+        )
         token = auth_engine.issue_authorization(
             transition_id=transition["id"],
             agent_id=agent_id,
@@ -410,6 +422,7 @@ class TestStaleAuthorizationAfterPolicyChange:
             tool="postgres.execute",
             payload_hash=payload_hash,
             matched_policies=[{"id": "fake_policy", "activation_version": 999}],
+            enforcement_capability=capability,
         )
         conn.commit()
 

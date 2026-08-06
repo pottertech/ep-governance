@@ -186,23 +186,23 @@ class TestVerifyFileOwnership:
         assert result.passed is True
 
     def test_oserror_returns_failed_check(self, tmp_path, monkeypatch):
-        """An OSError during lstat should produce a failed check."""
+        """An OSError during file open should produce a failed check."""
         f = tmp_path / "config.yaml"
         f.write_text("data")
         os.chmod(f, 0o644)
 
-        real_lstat = os.lstat
+        real_open = os.open
 
-        def _raise_oserror(path):  # noqa: ANN001
+        def _raise_oserror(path, flags, *args, **kwargs):  # noqa: ANN001
             if str(path) == str(f):
-                raise OSError("simulated stat failure")
-            return real_lstat(path)
+                raise OSError("simulated open failure")
+            return real_open(path, flags, *args, **kwargs)
 
-        monkeypatch.setattr(os, "lstat", _raise_oserror)
+        monkeypatch.setattr(os, "open", _raise_oserror)
 
         result = verify_file_ownership(str(f), require_uid=os.getuid())
         assert result.passed is False
-        assert "cannot stat" in result.evidence.lower()
+        assert "cannot open" in result.evidence.lower()
 
     def test_returns_isolation_check(self, tmp_path):
         """verify_file_ownership always returns an IsolationCheck."""

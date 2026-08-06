@@ -105,8 +105,9 @@ class TestFileProxy:
         result = proxy._execute_adapter(
             {"operation": "read", "path": "/etc/hosts"}, token, "attempt1"
         )
-        assert result.success is True
-        assert "read" in result.result_summary.lower()
+        assert result.success is False
+        assert result.exit_status == "not_implemented"
+        assert "not implemented" in result.result_summary.lower()
 
     def test_chmod_forbidden(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("file:///tmp", "file-proxy", ep_service_id)
@@ -188,7 +189,8 @@ class TestDockerProxy:
             "",
         )
         result = proxy._execute_adapter({"command": "docker ps"}, token, "a1")
-        assert result.success is True
+        assert result.success is False
+        assert result.exit_status == "not_implemented"
 
     def test_rm_restricted(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("docker://localhost", "docker-proxy", ep_service_id)
@@ -245,7 +247,9 @@ class TestEmailProxy:
         result = proxy._execute_adapter(
             {"to": ["test@example.com"], "subject": "Test", "body": "Hello"}, token, "a1"
         )
-        assert result.success is True
+        assert result.success is False
+        assert result.exit_status == "not_implemented"
+        assert "not implemented" in result.result_summary.lower()
         # Body must NOT be in result_summary (privacy)
         assert "Hello" not in result.result_summary
 
@@ -357,7 +361,9 @@ class TestHTTPProxy:
         result = proxy._execute_adapter(
             {"method": "GET", "url": "https://api.example.com/v1/status"}, token, "a1"
         )
-        assert result.success is True
+        assert result.success is False
+        assert result.exit_status == "not_implemented"
+        assert "not implemented" in result.result_summary.lower()
 
     def test_connect_forbidden(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("http://localhost", "http-proxy", ep_service_id)
@@ -412,7 +418,9 @@ class TestShellProxy:
             "",
         )
         result = proxy._execute_adapter({"command": "ls -la /tmp"}, token, "a1")
-        assert result.success is True
+        assert result.success is False
+        assert result.exit_status == "not_implemented"
+        assert "not implemented" in result.result_summary.lower()
 
     def test_eval_opaque_rejected(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("shell://localhost", "shell-proxy", ep_service_id)

@@ -50,6 +50,7 @@ from ep_governance.policies import Policy
 from ep_governance.policy_engine import PolicyEngine
 from ep_governance.transitions import TransitionEngine
 from ep_governance.xid import XID
+from ep_governance.deployment import EnforcementCapability
 
 
 PG_URL = os.environ.get(
@@ -191,6 +192,10 @@ class TestPGConcurrentTokenClaim:
         assert transition["stage"] == "authorized"
 
         payload_hash = "sha256:" + canonical_hash({"sql": "SELECT 1"})
+        capability = EnforcementCapability.for_test(
+            agent_principal_id=agent_id,
+        )
+
         token = auth_engine.issue_authorization(
             transition_id=transition["id"],
             agent_id=agent_id,
@@ -200,6 +205,7 @@ class TestPGConcurrentTokenClaim:
             tool="postgres.execute",
             payload_hash=payload_hash,
             matched_policies=[],
+            enforcement_capability=capability,
         )
         signed_token = token.to_signed_token(km)
 
@@ -471,6 +477,10 @@ class TestPGSerializableIsolation:
         assert transition["stage"] == "authorized"
 
         payload_hash = "sha256:" + canonical_hash({"sql": "SELECT 1"})
+        capability = EnforcementCapability.for_test(
+            agent_principal_id=agent_id,
+        )
+
         token = auth_engine.issue_authorization(
             transition_id=transition["id"],
             agent_id=agent_id,
@@ -480,6 +490,7 @@ class TestPGSerializableIsolation:
             tool="postgres.execute",
             payload_hash=payload_hash,
             matched_policies=[],
+            enforcement_capability=capability,
         )
         signed_token = token.to_signed_token(km)
 

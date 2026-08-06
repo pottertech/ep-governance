@@ -9,8 +9,8 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
-      # Governance DB (NAS PostgreSQL)
-      EP_DB_URL: "${EP_DB_URL}"
+      # Governance DB
+      EP_DB_URL: "${EP_DB_URL:?required}"
       EP_DB_SCHEMA: ep_governance
       EP_MODE: enforced
       EP_ALLOW_ADVISORY_EXECUTION: "false"
@@ -18,15 +18,29 @@ services:
       EP_FAIL_CLOSED: "true"
 
       # Target DB (what the proxy executes against)
-      EP_PROXY_TARGET_URL: "${EP_PROXY_TARGET_URL}"
-      EP_PROXY_AUDIENCE: postgres-proxy
+      EP_PROXY_TARGET_URL: "${EP_PROXY_TARGET_URL:?required}"
       EP_PROXY_PORT: "8201"
 
+      # Required attestation bindings (all four mandatory)
+      EP_PROXY_AUDIENCE: "${EP_PROXY_AUDIENCE:?required}"
+      EP_PROXY_PRINCIPAL_ID: "${EP_PROXY_PRINCIPAL_ID:?required}"
+      EP_DEPLOYMENT_ID: "${EP_DEPLOYMENT_ID:?required}"
+      EP_PROXY_TARGET_ID: "${EP_PROXY_TARGET_ID:?required}"
+
       # EP service identity
-      EP_EP_SERVICE_ID: "${EP_EP_SERVICE_ID}"
+      EP_EP_SERVICE_ID: "${EP_EP_SERVICE_ID:?required}"
 
       # Ed25519 public key for token verification (NOT the private key)
-      EP_PUBLIC_KEY: "${EP_PUBLIC_KEY}"
+      EP_PUBLIC_KEY: "${EP_PUBLIC_KEY:?required}"
+
+      # Signed attestation (mounted as read-only volume)
+      EP_PROXY_ATTESTATION_PATH: /run/ep-governance/proxy-attestation.json
+      EP_CONTROLLER_PUBLIC_KEY: "${EP_CONTROLLER_PUBLIC_KEY:?required}"
+    volumes:
+      # Mount the attestation file read-only into the container.
+      # The host path comes from EP_PROXY_ATTESTATION_FILE; the container
+      # always sees it at /run/ep-governance/proxy-attestation.json.
+      - "${EP_PROXY_ATTESTATION_FILE:?required}:/run/ep-governance/proxy-attestation.json:ro"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8201/health')"]
       interval: 30s

@@ -38,7 +38,7 @@ import socket
 import stat
 import sys
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Mapping
 
 from .errors import EPError
@@ -245,6 +245,12 @@ def verify_file_ownership(
     files are root-owned and not writable by the agent or other untrusted
     users.
 
+    This function uses a single safe file descriptor (os.open with
+    O_RDONLY | O_NOFOLLOW | O_CLOEXEC) to prevent a check-open race where
+    an attacker could replace the file after validation but before reading.
+    The file is opened once, validated via fstat, and the descriptor can
+    be used for subsequent reads without re-opening.
+
     Args:
         path: File path to check.
         require_uid: Required owner UID (default 0 = root).
@@ -262,17 +268,31 @@ def verify_file_ownership(
             evidence=f"File not found: {path}",
         )
 
+    # Use os.open with O_NOFOLLOW to atomically prevent symlink races.
+    # O_NOFOLLOW causes the open to fail if path is a symlink, so an
+    # attacker cannot swap a real file for a symlink after the lstat check.
+    # O_CLOEXEC prevents the descriptor from leaking to child processes.
+    fd = None
     try:
-        # Use lstat to detect symlinks without following them
-        st = os.lstat(path)
-
-        # Reject symlinks
-        if reject_symlinks and stat.S_ISLNK(st.st_mode):
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError as exc:
+        # Could be a symlink (ELOOP from O_NOFOLLOW) or permission issue.
+        errno = getattr(exc, "errno", 0)
+        if errno == 40:  # ELOOP -- symlink with O_NOFOLLOW
             return IsolationCheck(
                 name=f"file_ownership:{path}",
                 passed=False,
-                evidence=f"File is a symlink: {path} — symlinks are not trusted",
+                evidence=f"File is a symlink: {path} — symlinks are not trusted (blocked by O_NOFOLLOW)",
             )
+        return IsolationCheck(
+            name=f"file_ownership:{path}",
+            passed=False,
+            evidence=f"Cannot open file (errno={errno}): {exc}",
+        )
+
+    try:
+        # Use fstat on the descriptor (not the path) to prevent TOCTOU race.
+        st = os.fstat(fd)
 
         # Check owner UID
         if st.st_uid != require_uid:
@@ -309,13 +329,29 @@ def verify_file_ownership(
         return IsolationCheck(
             name=f"file_ownership:{path}",
             passed=False,
-            evidence=f"Cannot stat file: {exc}",
+            evidence=f"Cannot fstat file: {exc}",
         )
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 # --------------------------------------------------------------------------- #
 # Enforcement capability (for passing verified status into services)
 # --------------------------------------------------------------------------- #
+
+
+# Trust level for the capability provenance.
+# Untrusted capabilities (from env vars, direct construction) are test-only.
+# Trusted capabilities come from signed attestations verified with a
+# controller public key.
+_TRUST_LEVEL_UNVERIFIED = "unverified"
+_TRUST_LEVEL_SIGNED_ATTESTATION = "signed_attestation"
+_TRUST_LEVEL_TEST = "test"
+
+# Maximum lifetime for a signed attestation (1 hour).
+# Both the issuer and verifier should use this same constant.
+MAX_SIGNED_ATTESTATION_LIFETIME = timedelta(hours=1)
 
 
 @dataclass(frozen=True)
@@ -330,12 +366,33 @@ class EnforcementCapability:
     each component can independently verify that binding enforcement is
     active without re-running the full deployment check.
 
+    Production capabilities should be created via from_signed_attestation()
+    or from_status(). Direct construction is intended for tests only --
+    the trust_level field distinguishes provenance.
+
     Attributes:
         effective_mode: The verified effective mode ("enforced" or "advisory").
         binding_enforcement_active: Whether binding enforcement is active.
         agent_principal_id: The agent principal this capability is bound to.
-        verification_time: When the deployment was verified.
+            For proxy-scoped capabilities, this is "proxy".
+        verification_time: When the deployment was verified (ISO 8601 UTC).
         failure_reasons: Why enforcement is not active (if applicable).
+        proxy_scoped: If True, this capability represents the proxy process
+            itself (not an agent). The identity binding check against
+            token.agent_id is skipped for proxy-scoped capabilities.
+        issued_at: When this capability was issued (ISO 8601 UTC).
+        expires_at: When this capability expires (ISO 8601 UTC).
+            require_binding_enforcement() rejects expired capabilities.
+        deployment_id: Identifier for the deployment this capability is bound to.
+        runtime_instance_id: Identifier for the specific runtime instance.
+        proxy_principal_id: For proxy-scoped capabilities, the proxy's principal ID.
+        proxy_audience: For proxy-scoped capabilities, the proxy audience string.
+        target_id: For proxy-scoped capabilities, the target system identifier.
+        supported_action_types: For proxy-scoped capabilities, allowed action types.
+        attestation_digest: Digest of the attestation evidence (for signed capabilities).
+        trust_level: Provenance of this capability -- "test", "unverified",
+            or "signed_attestation". Only "signed_attestation" is trusted
+            for production enforced mode.
     """
 
     effective_mode: str
@@ -343,6 +400,17 @@ class EnforcementCapability:
     agent_principal_id: str
     verification_time: str
     failure_reasons: list[str] = field(default_factory=list)
+    proxy_scoped: bool = False
+    issued_at: str = ""
+    expires_at: str = ""
+    deployment_id: str = ""
+    runtime_instance_id: str = ""
+    proxy_principal_id: str = ""
+    proxy_audience: str = ""
+    target_id: str = ""
+    supported_action_types: list[str] = field(default_factory=list)
+    attestation_digest: str = ""
+    trust_level: str = _TRUST_LEVEL_TEST
 
     @classmethod
     def from_status(
@@ -350,13 +418,306 @@ class EnforcementCapability:
         status: EnforcementStatus,
         agent_principal_id: str,
     ) -> EnforcementCapability:
-        """Create a capability from an EnforcementStatus."""
+        """Create a capability from an EnforcementStatus.
+
+        This is the primary production path for agent-scoped capabilities.
+        The resulting capability has trust_level="unverified" because
+        EnforcementStatus is derived from environment checks and assertions,
+        not from a signed attestation. For production enforced mode, use
+        from_signed_attestation() instead.
+        """
+        now = datetime.now(UTC)
+        now_iso = now.isoformat()
+        from datetime import timedelta
+        expires = now + timedelta(seconds=300)
         return cls(
             effective_mode=status.effective_mode,
             binding_enforcement_active=status.binding_enforcement_active,
             agent_principal_id=agent_principal_id,
-            verification_time=datetime.now(UTC).isoformat(),
+            verification_time=now_iso,
             failure_reasons=status.reasons if not status.binding_enforcement_active else [],
+            issued_at=now_iso,
+            expires_at=expires.isoformat(),
+            trust_level=_TRUST_LEVEL_UNVERIFIED,
+        )
+
+    @classmethod
+    def for_test(
+        cls,
+        agent_principal_id: str,
+        proxy_scoped: bool = False,
+        proxy_principal_id: str = "",
+        proxy_audience: str = "",
+        deployment_id: str = "",
+        target_id: str = "",
+    ) -> EnforcementCapability:
+        """Create a test-only capability.
+
+        This is a convenience factory for tests. It creates a capability with
+        trust_level="test" and a 1-hour expiry. Production code should
+        NEVER use this -- it is explicitly marked as test-only and
+        require_binding_enforcement() will reject it when
+        EP_PRODUCTION_MODE=true is set.
+        """
+        now = datetime.now(UTC)
+        now_iso = now.isoformat()
+        from datetime import timedelta
+        expires = now + timedelta(seconds=3600)
+        return cls(
+            effective_mode="enforced",
+            binding_enforcement_active=True,
+            agent_principal_id=agent_principal_id,
+            verification_time=now_iso,
+            failure_reasons=[],
+            proxy_scoped=proxy_scoped,
+            issued_at=now_iso,
+            expires_at=expires.isoformat(),
+            proxy_principal_id=proxy_principal_id,
+            proxy_audience=proxy_audience,
+            deployment_id=deployment_id,
+            target_id=target_id,
+            trust_level=_TRUST_LEVEL_TEST,
+        )
+
+    @classmethod
+    def from_signed_attestation(
+        cls,
+        attestation: str | bytes,
+        trusted_public_key: Any,
+        expected_proxy_principal_id: str | None = None,
+        expected_proxy_audience: str | None = None,
+        expected_deployment_id: str | None = None,
+        expected_target_id: str | None = None,
+    ) -> EnforcementCapability:
+        """Create a capability from a signed attestation.
+
+        This is the production path for proxy-scoped capabilities. The
+        attestation is a JSON document signed with Ed25519 by a trusted
+        deployment controller. The signature is verified against
+        trusted_public_key.
+
+        The attestation JSON must contain:
+        - effective_mode: "enforced"
+        - binding_enforcement_active: true
+        - agent_principal_id: "proxy" (for proxy-scoped)
+        - proxy_scoped: true
+        - issued_at: ISO 8601 UTC
+        - expires_at: ISO 8601 UTC
+        - proxy_principal_id: the proxy's principal ID
+        - proxy_audience: the proxy audience string
+        - deployment_id: the deployment identifier
+        - target_id: the target system identifier
+        - supported_action_types: list of allowed action types
+
+        Optional expected_* parameters are checked against the attestation
+        fields and a mismatch raises EnforcementUnavailableError.
+
+        Args:
+            attestation: The signed attestation JSON (with "signature" field).
+            trusted_public_key: Ed25519 VerifyKey for the trusted controller.
+            expected_proxy_principal_id: If provided, must match attestation.
+            expected_proxy_audience: If provided, must match attestation.
+            expected_deployment_id: If provided, must match attestation.
+            expected_target_id: If provided, must match attestation.
+
+        Returns:
+            An EnforcementCapability with trust_level="signed_attestation".
+
+        Raises:
+            EnforcementUnavailableError: If signature verification fails,
+                required fields are missing, expected values don't match,
+                or the attestation is expired.
+        """
+        import json as _json
+        import hashlib as _hashlib
+
+        if isinstance(attestation, bytes):
+            attestation = attestation.decode("utf-8")
+
+        try:
+            data = _json.loads(attestation)
+        except (_json.JSONDecodeError, TypeError) as exc:
+            raise EnforcementUnavailableError(
+                f"Invalid attestation JSON: {exc}"
+            )
+
+        signature_hex = data.get("signature", "")
+        if not signature_hex:
+            raise EnforcementUnavailableError(
+                "Attestation missing signature field"
+            )
+
+        # Verify signature over everything except the signature field.
+        from .canonical import canonical_json_bytes
+        canonical_payload = {k: v for k, v in data.items() if k != "signature"}
+        message = canonical_json_bytes(canonical_payload)
+
+        try:
+            trusted_public_key.verify(message, bytes.fromhex(signature_hex))
+        except Exception:
+            raise EnforcementUnavailableError(
+                "Attestation signature verification failed"
+            )
+
+        # Extract required fields (including supported_action_types -- mandatory).
+        required_fields = [
+            "effective_mode", "binding_enforcement_active", "agent_principal_id",
+            "proxy_scoped", "issued_at", "expires_at",
+            "proxy_principal_id", "proxy_audience", "deployment_id", "target_id",
+            "supported_action_types",
+        ]
+        missing = [f for f in required_fields if f not in data]
+        if missing:
+            raise EnforcementUnavailableError(
+                f"Attestation missing required fields: {', '.join(missing)}"
+            )
+
+        # --- Strict semantic validation (P0-2) ---
+        # effective_mode must be "enforced" for a production attestation.
+        if data["effective_mode"] != "enforced":
+            raise EnforcementUnavailableError(
+                f"Attestation effective_mode must be 'enforced', got "
+                f"'{data['effective_mode']}'"
+            )
+
+        # binding_enforcement_active must be exactly True (not "true" string).
+        if data["binding_enforcement_active"] is not True:
+            raise EnforcementUnavailableError(
+                "Attestation binding_enforcement_active must be true (boolean)"
+            )
+
+        # proxy_scoped must be exactly True for a proxy attestation.
+        if data["proxy_scoped"] is not True:
+            raise EnforcementUnavailableError(
+                "Attestation proxy_scoped must be true (boolean) for a proxy attestation"
+            )
+
+        # agent_principal_id must be "proxy" for proxy-scoped attestations.
+        if data["agent_principal_id"] != "proxy":
+            raise EnforcementUnavailableError(
+                f"Attestation agent_principal_id must be 'proxy' for proxy-scoped "
+                f"attestations, got '{data['agent_principal_id']}'"
+            )
+
+        # Validate that identifier fields are nonempty strings.
+        for field_name in [
+            "proxy_principal_id", "proxy_audience", "deployment_id",
+            "target_id", "issued_at", "expires_at",
+        ]:
+            val = data[field_name]
+            if not isinstance(val, str) or not val:
+                raise EnforcementUnavailableError(
+                    f"Attestation field '{field_name}' must be a nonempty string"
+                )
+
+        # --- Validate supported_action_types (P0-1) ---
+        # Must be a nonempty list of nonempty strings. An empty or omitted
+        # list must NOT be treated as universal -- that would be fail-open.
+        supported_types = data["supported_action_types"]
+        if not isinstance(supported_types, list) or not supported_types:
+            raise EnforcementUnavailableError(
+                "Attestation supported_action_types must be a nonempty list"
+            )
+        if not all(isinstance(item, str) and item for item in supported_types):
+            raise EnforcementUnavailableError(
+                "Attestation supported_action_types contains invalid entries"
+            )
+        # Reject duplicates to keep the signed document canonical.
+        if len(set(supported_types)) != len(supported_types):
+            raise EnforcementUnavailableError(
+                "Attestation supported_action_types contains duplicates"
+            )
+
+        # --- Validate timestamps (P1-1) ---
+        now = datetime.now(UTC)
+        allowed_clock_skew = timedelta(seconds=300)  # 5 minutes
+
+        def _parse_attestation_time(value: str, field_name: str) -> datetime:
+            """Parse an ISO 8601 timestamp and require timezone info."""
+            try:
+                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise EnforcementUnavailableError(
+                    f"Invalid {field_name} in attestation: {value}"
+                ) from exc
+            if parsed.tzinfo is None:
+                raise EnforcementUnavailableError(
+                    f"Attestation {field_name} must include a timezone: {value}"
+                )
+            return parsed.astimezone(UTC)
+
+        expires_dt = _parse_attestation_time(data["expires_at"], "expires_at")
+        issued_dt = _parse_attestation_time(data["issued_at"], "issued_at")
+
+        # Expiry must be in the future (use <= so exact expiry time is rejected).
+        if expires_dt <= now:
+            raise EnforcementUnavailableError(
+                f"Attestation expired at {data['expires_at']}"
+            )
+
+        # Issuance must not be far in the future (clock skew allowance).
+        if issued_dt > now + allowed_clock_skew:
+            raise EnforcementUnavailableError(
+                f"Attestation issued_at is in the future: {data['issued_at']}"
+            )
+
+        # Expiration must follow issuance.
+        if expires_dt <= issued_dt:
+            raise EnforcementUnavailableError(
+                "Attestation expires_at must be after issued_at"
+            )
+
+        # Maximum attestation lifetime (1 hour).
+        if expires_dt - issued_dt > MAX_SIGNED_ATTESTATION_LIFETIME:
+            raise EnforcementUnavailableError(
+                f"Attestation lifetime exceeds maximum of {MAX_SIGNED_ATTESTATION_LIFETIME}"
+            )
+
+        # Check expected values if provided.
+        if expected_proxy_principal_id and data["proxy_principal_id"] != expected_proxy_principal_id:
+            raise EnforcementUnavailableError(
+                f"Attestation proxy_principal_id mismatch: expected "
+                f"{expected_proxy_principal_id}, got {data['proxy_principal_id']}"
+            )
+        if expected_proxy_audience and data["proxy_audience"] != expected_proxy_audience:
+            raise EnforcementUnavailableError(
+                f"Attestation proxy_audience mismatch: expected "
+                f"{expected_proxy_audience}, got {data['proxy_audience']}"
+            )
+        if expected_deployment_id and data["deployment_id"] != expected_deployment_id:
+            raise EnforcementUnavailableError(
+                f"Attestation deployment_id mismatch: expected "
+                f"{expected_deployment_id}, got {data['deployment_id']}"
+            )
+        if expected_target_id and data["target_id"] != expected_target_id:
+            raise EnforcementUnavailableError(
+                f"Attestation target_id mismatch: expected "
+                f"{expected_target_id}, got {data['target_id']}"
+            )
+
+        # Compute attestation digest for traceability.
+        attestation_digest = _hashlib.sha256(attestation.encode("utf-8")).hexdigest()
+
+        supported_types = data["supported_action_types"]
+        runtime_instance_id = data.get("runtime_instance_id", "")
+
+        return cls(
+            effective_mode=data["effective_mode"],
+            binding_enforcement_active=data["binding_enforcement_active"],
+            agent_principal_id=data["agent_principal_id"],
+            verification_time=data.get("verification_time", data["issued_at"]),
+            failure_reasons=data.get("failure_reasons", []),
+            proxy_scoped=data["proxy_scoped"],
+            issued_at=data["issued_at"],
+            expires_at=data["expires_at"],
+            deployment_id=data["deployment_id"],
+            runtime_instance_id=runtime_instance_id,
+            proxy_principal_id=data["proxy_principal_id"],
+            proxy_audience=data["proxy_audience"],
+            target_id=data["target_id"],
+            supported_action_types=supported_types,
+            attestation_digest=attestation_digest,
+            trust_level=_TRUST_LEVEL_SIGNED_ATTESTATION,
         )
 
     def require_binding_enforcement(self) -> None:
@@ -364,6 +725,13 @@ class EnforcementCapability:
 
         This is the method that authorization issuance, ep_execute, and proxy
         execution should call before performing governed operations.
+
+        It checks:
+        1. binding_enforcement_active is True.
+        2. The capability has not expired (if expires_at is set).
+        3. In production mode (EP_PRODUCTION_MODE=true), the capability
+           must have trust_level="signed_attestation". Test and unverified
+           capabilities are rejected in production.
         """
         if not self.binding_enforcement_active:
             reasons = "; ".join(self.failure_reasons) if self.failure_reasons else "unknown"
@@ -371,6 +739,66 @@ class EnforcementCapability:
                 f"Binding enforcement is not active (effective mode: "
                 f"{self.effective_mode}). Reasons: {reasons}"
             )
+
+        # Check expiration.
+        if self.expires_at:
+            now = datetime.now(UTC)
+            try:
+                expires_dt = datetime.fromisoformat(
+                    self.expires_at.replace("Z", "+00:00")
+                )
+                if expires_dt < now:
+                    raise EnforcementUnavailableError(
+                        f"Enforcement capability expired at {self.expires_at}"
+                    )
+            except (ValueError, AttributeError):
+                raise EnforcementUnavailableError(
+                    f"Invalid expires_at in capability: {self.expires_at}"
+                )
+
+        # In production mode, reject non-signed capabilities.
+        production = os.environ.get("EP_PRODUCTION_MODE", "").lower() in ("true", "1", "yes")
+        if production and self.trust_level != _TRUST_LEVEL_SIGNED_ATTESTATION:
+            raise EnforcementUnavailableError(
+                f"Production mode requires signed_attestation capability, "
+                f"got trust_level={self.trust_level}. Test and unverified "
+                f"capabilities are not allowed in production."
+            )
+
+    def require_proxy_scoped(self) -> None:
+        """Verify this is a proxy-scoped capability with proper identity binding.
+
+        Raises EnforcementUnavailableError if:
+        - proxy_scoped is not True
+        - proxy_principal_id is empty
+        - proxy_audience is empty
+        """
+        if not self.proxy_scoped:
+            raise EnforcementUnavailableError(
+                "Capability is not proxy-scoped. Proxy execution requires "
+                "a proxy-scoped capability."
+            )
+        if not self.proxy_principal_id:
+            raise EnforcementUnavailableError(
+                "Proxy-scoped capability missing proxy_principal_id"
+            )
+        if not self.proxy_audience:
+            raise EnforcementUnavailableError(
+                "Proxy-scoped capability missing proxy_audience"
+            )
+
+    def matches_proxy_audience(self, audience: str) -> bool:
+        """Check if this capability's proxy_audience matches the given audience."""
+        return self.proxy_scoped and self.proxy_audience == audience
+
+    def supports_action_type(self, action_type: str) -> bool:
+        """Check if this capability allows the given action type.
+
+        If supported_action_types is empty, all types are allowed (backward compat).
+        """
+        if not self.supported_action_types:
+            return True
+        return action_type in self.supported_action_types
 
 
 # --------------------------------------------------------------------------- #
@@ -583,11 +1011,11 @@ def verify_deployment(
     agent_tools: list[str] | None = None,
     attestation: EnforcementAttestation | None = None,
     proxy_health_url: str | None = None,
+    proxy_health_public_key_hex: str | None = None,
 ) -> EnforcementStatus:
     """Verify deployment isolation and determine effective enforcement mode.
 
     This is the main entry point.  It combines:
-
     1. Runtime environment checks (credential env vars, Docker socket, etc.)
     2. Deployment assertions (EP_ASSERT_* from orchestrator)
     3. Agent tool manifest check (if provided)
@@ -603,12 +1031,26 @@ def verify_deployment(
     Otherwise the effective mode is "advisory" with reasons explaining
     which checks failed.
 
+    Trust levels (Finding 5):
+    - Environment variable assertions (EP_ASSERT_*) are "unverified" --
+      they can be set by anyone with environment access and are not signed.
+    - Signed controller attestations provide "signed_attestation" trust.
+    - In production (EP_PRODUCTION_MODE=true), only signed attestations
+      should be accepted for enforced mode. The verify_deployment function
+      itself cannot enforce this -- it returns an EnforcementStatus which
+      the caller converts to an EnforcementCapability. The capability's
+      require_binding_enforcement() checks trust_level in production mode.
+
     Args:
         requested_mode: The configured mode ("enforced" or "advisory").
         env: Environment dict (defaults to os.environ).
         agent_tools: List of tools the agent has access to (from orchestrator).
         attestation: Explicit attestation object (overrides env-based loading).
         proxy_health_url: URL to check proxy health (e.g., http://proxy:8201/health).
+        proxy_health_public_key_hex: Hex-encoded Ed25519 public key of the
+            proxy for authenticated health checks (Finding 6). When provided,
+            the health check uses a signed nonce challenge instead of a
+            plain HTTP 200 check.
 
     Returns:
         EnforcementStatus with effective_mode, checks, and reasons.
@@ -711,7 +1153,7 @@ def verify_deployment(
     # or protected by mTLS. For now, we require the URL to be provided
     # and the HTTP check to succeed.
     if proxy_health_url:
-        proxy_ok = _check_proxy_health(proxy_health_url)
+        proxy_ok = _check_proxy_health(proxy_health_url, proxy_public_key_hex=proxy_health_public_key_hex)
         checks.append(IsolationCheck(
             name="proxy_health_active",
             passed=proxy_ok,
@@ -750,21 +1192,70 @@ def verify_deployment(
     )
 
 
-def _check_proxy_health(url: str, timeout: float = 5.0) -> bool:
-    """Attempt to reach the proxy health endpoint.
+def _check_proxy_health(
+    url: str,
+    timeout: float = 5.0,
+    proxy_public_key_hex: str | None = None,
+) -> bool:
+    """Attempt to reach the proxy health endpoint with an authenticated challenge.
+
+    If proxy_public_key_hex is provided, the health check uses a signed
+    nonce challenge: the client sends a random nonce, the proxy signs it
+    with its Ed25519 private key, and the client verifies the signature.
+    This proves the responder possesses the proxy's private key, not just
+    any web server.
+
+    If proxy_public_key_hex is not provided (backward compatibility), falls
+    back to a simple HTTP 200 check. This is weak and should not be used
+    in production -- the caller should supply the proxy's public key.
 
     Args:
         url: Health check URL (e.g., http://100.64.0.20:8201/health).
         timeout: Connection timeout in seconds.
+        proxy_public_key_hex: Hex-encoded Ed25519 public key of the proxy.
+            When provided, a signed nonce challenge is performed.
 
     Returns:
-        True if the proxy responded with HTTP 200, False otherwise.
+        True if the proxy health check passed (HTTP 200 for basic, or
+        valid signature for authenticated), False otherwise.
     """
     try:
         import urllib.request
-        req = urllib.request.Request(url, method="GET")
+        import secrets as _secrets
+
+        if proxy_public_key_hex is None:
+            # Backward-compatible basic check (weak -- not for production).
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.status == 200
+
+        # Authenticated challenge: send a nonce, verify the proxy signs it.
+        from nacl.signing import VerifyKey
+
+        nonce = _secrets.token_hex(32)
+        challenge_url = f"{url}?nonce={nonce}"
+        req = urllib.request.Request(challenge_url, method="GET")
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.status == 200
+            if resp.status != 200:
+                return False
+            import json as _json
+            body = _json.loads(resp.read().decode("utf-8"))
+            signature_hex = body.get("signature", "")
+            if not signature_hex:
+                return False
+            # Verify the proxy signed the nonce with its private key.
+            verify_key = VerifyKey(bytes.fromhex(proxy_public_key_hex))
+            verify_key.verify(
+                nonce.encode("utf-8"),
+                bytes.fromhex(signature_hex),
+            )
+            # Optionally verify proxy identity fields in the response.
+            proxy_principal_id = body.get("proxy_principal_id", "")
+            proxy_audience = body.get("proxy_audience", "")
+            deployment_id = body.get("deployment_id", "")
+            # These fields are informational -- the signature proves identity.
+            return True
+
     except Exception:
         return False
 

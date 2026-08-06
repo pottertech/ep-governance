@@ -18,13 +18,14 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install dependencies (from lock file)
         run: |
           pip install --upgrade pip
-          pip install -e ".[postgres,crypto,dev]"
+          pip install -r requirements.lock
+          pip install -e ".[postgres,crypto]"
 
-      - name: Run tests
-        run: pytest tests/ -q --tb=short
+      - name: Run full verification
+        run: ./scripts/verify.sh
 
   test-postgres:
     name: PostgreSQL integration tests
@@ -51,15 +52,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install dependencies (from lock file)
         run: |
           pip install --upgrade pip
-          pip install -e ".[postgres,crypto,dev]"
+          pip install -r requirements.lock
+          pip install -e ".[postgres,crypto]"
 
       - name: Run full test suite with PostgreSQL
         env:
           EP_TEST_DB_URL: postgresql://ep_test:ep_test_pw@localhost:5432/ep_governance_test
-        run: pytest tests/ -q --tb=short
+        run: ./scripts/verify.sh
 
   cli-smoke:
     name: CLI smoke tests
@@ -72,10 +74,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install dependencies (from lock file)
         run: |
           pip install --upgrade pip
-          pip install -e ".[postgres,crypto,dev]"
+          pip install -r requirements.lock
+          pip install -e ".[postgres,crypto]"
 
       - name: Verify CLI commands exist
         run: |
@@ -101,9 +104,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install tools
+      - name: Install project and security tools (from lock file)
         run: |
           pip install --upgrade pip
+          pip install -r requirements.lock
+          pip install -e ".[postgres,crypto]"
           pip install bandit pip-audit
 
       - name: Bandit security scan
@@ -118,20 +123,26 @@ jobs:
 
       - name: Check for actionable Bandit findings
         run: |
-          # Fail on HIGH and CRITICAL findings only.
-          # LOW and MEDIUM findings are reported but do not fail CI.
+          # Fail on HIGH severity findings.
+          # MEDIUM findings are reported but do not fail CI.
+          # A baseline comparison for new MEDIUM findings is a future improvement.
           python3 -c "
           import json
           with open('bandit-report.json') as f:
               data = json.load(f)
-          high_critical = [r for r in data.get('results', []) if r.get('issue_severity') in ('HIGH', 'CRITICAL')]
-          if high_critical:
-              for r in high_critical:
-                  print(f\"  [{r['issue_severity']}] {r['filename']}:{r['line_number']} — {r['issue_text'][:80]}\")
-              print(f'\\n{len(high_critical)} HIGH/CRITICAL findings — CI failed.')
+          high_findings = [r for r in data.get('results', []) if r.get('issue_severity') == 'HIGH']
+          medium_findings = [r for r in data.get('results', []) if r.get('issue_severity') == 'MEDIUM']
+          if high_findings:
+              for r in high_findings:
+                  print(f\"  [HIGH] {r['filename']}:{r['line_number']} — {r['issue_text'][:80]}\")
+              print(f'\n{len(high_findings)} HIGH findings — CI failed.')
               exit(1)
+          if medium_findings:
+              for r in medium_findings:
+                  print(f\"  [MEDIUM] {r['filename']}:{r['line_number']} — {r['issue_text'][:80]}\")
+              print(f'\n{len(medium_findings)} MEDIUM findings (reported, does not fail CI).')
           else:
-              print('No HIGH/CRITICAL Bandit findings.')
+              print('No HIGH Bandit findings. No MEDIUM findings.')
           "
 
       - name: Dependency audit

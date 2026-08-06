@@ -28,6 +28,7 @@ from .db.repositories import (
     PolicyRepository,
     PrincipalRepository,
 )
+from .deployment import EnforcementCapability
 from .errors import PolicyIntegrityError, EPError
 from .policy_engine import PolicyEngine
 from .transitions import TransitionEngine
@@ -86,7 +87,7 @@ def get_tools(mode: str = "enforced") -> list[Tool]:
 def create_server(
     mode: str = "enforced",
     authenticated_principal_id: str | None = None,
-    enforcement_capability: Any = None,
+    enforcement_capability: EnforcementCapability | None = None,
 ) -> Server:
     """Create an MCP server with EP-Governance tools.
 
@@ -187,7 +188,7 @@ def _handle_tool_call(
     arguments: dict[str, Any],
     mode: str,
     authenticated_principal_id: str,
-    enforcement_capability: Any = None,
+    enforcement_capability: EnforcementCapability | None = None,
 ) -> dict[str, Any]:
     """Handle a tool call and return a result dict.
 
@@ -259,7 +260,7 @@ def _handle_tool_call(
             # This is the per-operation enforcement boundary.
             if enforcement_capability is not None:
                 enforcement_capability.require_binding_enforcement()
-            return _ep_execute(conn, arguments, authenticated_principal_id)
+            return _ep_execute(conn, arguments, authenticated_principal_id, enforcement_capability)
         elif name == "ep_status":
             return _ep_status(conn, arguments)
         elif name == "ep_log":
@@ -565,7 +566,35 @@ def _ep_check(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any]:
     return {"transition_id": transition["id"], "stage": transition["stage"]}
 
 
-def _ep_execute(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any]:
+def _ep_execute(
+    conn: Any,
+    args: dict[str, Any],
+    agent_id: str,
+    enforcement_capability: EnforcementCapability | None = None,
+) -> dict[str, Any]:
+    """Execute a governed action through the full enforcement pipeline.
+
+    In enforced mode (binding enforcement active), this:
+    1. Proposes the action through the transition engine
+    2. If authorized, issues a signed authorization token
+    3. Returns the transition with explicit execution status
+
+    The actual proxy execution is handled by the proxy service (separate
+    process). This function returns the authorization token and transition
+    state so the caller can submit the token to the proxy.
+
+    If the transition is not authorized (denied, pending_approval), returns
+    the transition state with explicit next_action guidance.
+
+    Args:
+        conn: Database connection.
+        args: Tool arguments (branch_id, tool, arguments).
+        agent_id: Authenticated agent principal ID.
+        enforcement_capability: Required for enforced mode execution.
+
+    Returns:
+        Dict with transition_id, stage, executed (bool), and next_action.
+    """
     ep_id = _get_ep_service_id(conn)
     branch_id = args["branch_id"]
     policy_engine = _build_policy_engine(
@@ -579,7 +608,106 @@ def _ep_execute(conn: Any, args: dict[str, Any], agent_id: str) -> dict[str, Any
         arguments=args["arguments"],
         idempotency_key=str(XID.new()),
     )
-    return {"transition_id": transition["id"], "stage": transition["stage"]}
+
+    stage = transition["stage"]
+
+    # If not authorized, return with explicit next_action.
+    if stage == "denied":
+        return {
+            "transition_id": transition["id"],
+            "stage": "denied",
+            "executed": False,
+            "next_action": "action_denied_by_policy",
+        }
+    if stage == "pending_approval":
+        return {
+            "transition_id": transition["id"],
+            "stage": "pending_approval",
+            "executed": False,
+            "next_action": "await_approval",
+        }
+    if stage != "authorized":
+        return {
+            "transition_id": transition["id"],
+            "stage": stage,
+            "executed": False,
+            "next_action": f"unexpected_stage:{stage}",
+        }
+
+    # Authorized -- issue a signed token if we have a capability.
+    if enforcement_capability is None:
+        # No capability -- cannot issue token. Return the transition
+        # but flag that execution requires a capability.
+        return {
+            "transition_id": transition["id"],
+            "stage": "authorized",
+            "executed": False,
+            "next_action": "requires_enforcement_capability",
+            "message": (
+                "Action is authorized but cannot be executed without an "
+                "EnforcementCapability. In enforced mode, pass a verified "
+                "capability to create_server()."
+            ),
+        }
+
+    # Verify binding enforcement is active before issuing a token.
+    enforcement_capability.require_binding_enforcement()
+
+    # Issue the authorization token.
+    from .authorizations import AuthorizationEngine, KeyManager
+    from .canonical import canonical_hash
+    from .db.repositories import ProjectRepository
+
+    # Get project_id for the token.
+    project_id = _resolve_project_id(conn, branch_id=branch_id)
+    if not project_id:
+        return {
+            "transition_id": transition["id"],
+            "stage": "authorized",
+            "executed": False,
+            "error": "Could not resolve project_id from branch_id",
+        }
+
+    # Load or create a KeyManager for signing.
+    # In production, the signing key should be loaded from a secure location.
+    km = KeyManager()
+
+    auth_engine = AuthorizationEngine(conn.engine, km, ep_id)
+    payload_hash = "sha256:" + canonical_hash(args["arguments"])
+
+    matched_policy_versions = transition.get("matched_policy_versions", {})
+    matched_policies_list = [
+        {"id": pid, "activation_version": ver}
+        for pid, ver in matched_policy_versions.items()
+    ]
+
+    token = auth_engine.issue_authorization(
+        transition_id=transition["id"],
+        agent_id=agent_id,
+        project_id=project_id,
+        branch_id=branch_id,
+        proxy_audience=args.get("proxy_audience", "postgres-proxy"),
+        tool=args["tool"],
+        payload_hash=payload_hash,
+        matched_policies=matched_policies_list,
+        enforcement_capability=enforcement_capability,
+    )
+
+    signed_token = token.to_signed_token(km)
+
+    return {
+        "transition_id": transition["id"],
+        "stage": "authorized",
+        "executed": False,  # Proxy execution is a separate step
+        "authorization_id": token.authorization_id,
+        "signed_token": signed_token,
+        "expires_at": token.expires_at,
+        "next_action": "submit_token_to_proxy",
+        "message": (
+            "Authorization token issued. Submit the signed_token to the "
+            "proxy service at /execute to perform the action."
+        ),
+    }
 
 
 def _ep_status(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
@@ -752,7 +880,7 @@ def _ep_audit_verify(conn: Any, args: dict[str, Any]) -> dict[str, Any]:
 async def run_server(
     mode: str = "enforced",
     authenticated_principal_id: str | None = None,
-    enforcement_capability: Any = None,
+    enforcement_capability: EnforcementCapability | None = None,
 ) -> None:
     """Run the MCP server over stdio.
 

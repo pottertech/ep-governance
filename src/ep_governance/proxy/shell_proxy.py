@@ -172,10 +172,11 @@ class ShellProxy(GovernedProxy):
                     result_summary="Command contains dangerous pattern — classified as opaque, requires approval",
                 )
 
-        # Simulated execution
+        # Execution adapter is not implemented — return failure so the
+        # governance graph does not record a no-op as success.
         return ExecutionResult(
-            success=True,
-            exit_status="success",
-            result_summary=f"Would execute: {command}",
-            output=f"[simulated] {command}",
+            success=False,
+            exit_status="not_implemented",
+            result_summary="Shell execution adapter is not implemented",
+            output=None,
         )

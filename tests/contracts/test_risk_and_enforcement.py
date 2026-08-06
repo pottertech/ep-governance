@@ -339,7 +339,7 @@ class TestEnforcedModeIsolation:
             ]
 
         monkeypatch.setattr(dep_mod, "check_runtime_environment", mock_check_runtime)
-        monkeypatch.setattr(dep_mod, "_check_proxy_health", lambda url: True)
+        monkeypatch.setattr(dep_mod, "_check_proxy_health", lambda url, **kwargs: True)
         status = verify_deployment(
             requested_mode="enforced",
             env={},

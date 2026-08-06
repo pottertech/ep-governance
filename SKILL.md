@@ -6,29 +6,26 @@ This skill provides the integration point between Hermes agents and the EP-Gover
 
 ## Deployment
 
-- Mode: enforced (verified July 30, 2026; enforcement architecture expanded August 2, 2026)
-- Database: NAS PostgreSQL at 100.98.247.27:5433 (ep_governance schema in gbrain_pilot_test)
-- CLI wrapper: `/usr/local/bin/ep-governance`
+- Mode: enforced (enforcement architecture verified August 3, 2026)
+- Database: configured through EP_DB_URL (EP_GOV_DB_SCHEMA for schema)
+- CLI wrapper: `ep-governance` (installed via pip)
 - MCP server: configured in Hermes config.yaml
-- Ed25519 signing key: `ep_signing_test.key` (EP holds private key, proxies hold public key)
+- Ed25519 signing key: configured through EP_SIGNING_KEY_FILE (EP holds private key, proxies hold public key)
 - Production config flags: EP_ALLOW_ADVISORY_EXECUTION=false, EP_REQUIRE_SIGNED_AUTHORIZATION=true, EP_FAIL_CLOSED=true
 - Advisory mode rejected at config load time in production
 
 ## Registered entities
 
-- Agent: Mary Wise (d9ll46fug6j0mqovnr0g)
-- Human admin: Skip Potter (d9ln1j7ug6j43bbhclsg)
-- EP Service: d9ll4o7ug6j0oak02ck0
-- Project: EP-Governance Deployment (d9ll4c7ug6j0neitrvmg)
-- Branch: main (d9ll4c7ug6j0neitrvng)
-- 6 active governance policies (deny prod DB drops, require approval for deployments/shell/email, warn on git mutations, allow read-only)
+Entity IDs (agents, human admins, EP service, projects, branches) are loaded
+dynamically from the governance database at runtime. Use `ep-governance status`
+to list current entities. Do not hard-code entity identifiers in shared files.
 
 ## Session bootstrap
 
 At the start of every session, load the current governance state:
 
 ```bash
-ep-governance status --branch d9ll4c7ug6j0neitrvng --json
+ep-governance status --branch <BRANCH_ID> --json
 ```
 
 This gives you:
@@ -51,8 +48,8 @@ Before ANY of the following action types, run `ep-governance check`:
 ep-governance check \
   --tool <tool-name> \
   --arguments '<json-arguments>' \
-  --branch d9ll4c7ug6j0neitrvng \
-  --agent d9ll46fug6j0mqovnr0g \
+  --branch <BRANCH_ID> \
+  --agent <AGENT_ID> \
   --json
 ```
 
@@ -68,7 +65,7 @@ ep-governance check \
 
 ## Operating modes
 
-- Enforced (current): consequential tools available only through ep_execute via the governed proxy. Ed25519-signed authorization tokens, atomic claims, payload verification, credential isolation. Advisory mode is rejected in production (config load time).
+- Enforced: consequential tools available only through ep_execute via the governed proxy. Ed25519-signed authorization tokens, atomic claims, payload verification, credential isolation. Advisory mode is rejected in production (config load time).
 - Advisory: agent calls ep_check before actions. No enforcement. Only available in development (EP_DEV=true + EP_ALLOW_ADVISORY_EXECUTION=true).
 
 ## Enforced mode pipeline
@@ -92,17 +89,6 @@ The full execution path in enforced mode:
 14. On success: EP creates graph node, advances branch head, appends audit event
 15. On failure: EP records failure, no node created
 16. On timeout: EP marks execution_uncertain for manual reconciliation
-
-## Verified test results (July 30, 2026)
-
-End-to-end enforced mode test against NAS PostgreSQL:
-
-- TEST 1 PASS: SELECT 1 -> propose -> authorized -> Ed25519 token issued -> proxy verified, claimed, executed -> graph node created -> branch head advanced (v1->v2) -> transition succeeded
-- TEST 2 PASS: DROP TABLE -> denied by deny policy (priority 100)
-- TEST 3 PASS: Token reuse -> rejected (authorization already claimed)
-- TEST 4 PASS: Payload tampering -> hash mismatch detected, execution refused
-
-Total tests: 972 passed, 1 skipped, 0 failed
 
 ## MCP tools
 

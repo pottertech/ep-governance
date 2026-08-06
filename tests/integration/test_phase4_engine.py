@@ -11,7 +11,7 @@ References: directive section 29 (required high-value tests)
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+
 
 import pytest
 import sqlalchemy as sa
@@ -39,6 +39,7 @@ from ep_governance.transitions import (
 )
 from ep_governance.branches import BranchCommitter
 from ep_governance.errors import IllegalTransitionError, StaleHeadError
+from ep_governance.deployment import EnforcementCapability
 
 
 def _build_allow_policy_engine():
@@ -353,6 +354,10 @@ class TestAuthorizationTokens:
         conn.commit()
 
         if transition["stage"] == "authorized":
+            capability = EnforcementCapability.for_test(
+            agent_principal_id=agent_id,
+        )
+
             token = auth_engine.issue_authorization(
                 transition_id=transition["id"],
                 agent_id=agent_id,
@@ -362,6 +367,7 @@ class TestAuthorizationTokens:
                 tool="postgres.execute",
                 payload_hash="sha256:" + "a" * 64,
                 matched_policies=[],
+                enforcement_capability=capability,
             )
             conn.commit()
             assert token is not None
@@ -384,6 +390,10 @@ class TestAuthorizationTokens:
         conn.commit()
 
         if transition["stage"] == "authorized":
+            capability = EnforcementCapability.for_test(
+            agent_principal_id=agent_id,
+        )
+
             token = auth_engine.issue_authorization(
                 transition_id=transition["id"],
                 agent_id=agent_id,
@@ -393,6 +403,7 @@ class TestAuthorizationTokens:
                 tool="postgres.execute",
                 payload_hash="sha256:" + "a" * 64,
                 matched_policies=[],
+                enforcement_capability=capability,
             )
             conn.commit()
 
@@ -440,6 +451,10 @@ class TestAuthorizationTokens:
             original_hash = "sha256:" + "a" * 64
             altered_hash = "sha256:" + "b" * 64
 
+            capability = EnforcementCapability.for_test(
+            agent_principal_id=agent_id,
+        )
+
             token = auth_engine.issue_authorization(
                 transition_id=transition["id"],
                 agent_id=agent_id,
@@ -449,6 +464,7 @@ class TestAuthorizationTokens:
                 tool="postgres.execute",
                 payload_hash=original_hash,
                 matched_policies=[],
+                enforcement_capability=capability,
             )
             conn.commit()
 

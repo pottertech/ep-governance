@@ -4,11 +4,11 @@ A binding governance system for AI agents. It maintains a persistent directed ac
 
 ## Status
 
-Enforced mode verified (July 30, 2026). Full pipeline tested:
+Enforced mode verified (August 3, 2026). Full pipeline tested:
 propose, policy evaluation, Ed25519 token issuance, governed proxy execution,
 graph node creation, branch head advancement. Token reuse and payload tampering
-rejected. 984 tests collected: 973 passed, 11 skipped (10 require `EP_TEST_DB_URL`,
-1 requires PostgreSQL). 4 end-to-end enforced mode tests pass.
+rejected. Enforcement capabilities are mandatory, identity-bound, and
+attestation-verified. See Verification section below for current test counts.
 
 ## Governing Documents
 
@@ -34,7 +34,7 @@ Where the two conflict, v1.1.1 governs.
 - Maintains a persistent DAG outside any LLM that binds any connected model
 - Evaluates deterministic policies before authorizing actions
 - Issues signed, payload-bound, short-lived, single-use authorization tokens
-- Requires a governed proxy to execute consequential actions
+- Requires a governed proxy to execute consequential actions (PostgreSQL proxy is production candidate; other adapters validate and classify but return not_implemented — see Proxy Support Matrix below)
 - Records all transitions in an append-only hash-chained audit log
 - Supports multi-agent concurrency with optimistic branch-head locking
 - Exports signed, versioned transfer packages for model switching
@@ -116,22 +116,43 @@ Without these deployment measures, EP-Governance operates in advisory mode regar
 
 ### Test Reproducibility
 
+Test counts change with each commit. Run `./scripts/verify.sh` for authoritative
+results against the current codebase. The CI workflow uses the same script.
+
 | Item | Value |
 |------|-------|
-| Tested commit | `f582bcd` (August 2, 2026) |
+| Last verified | August 3, 2026 |
 | Python | 3.12+ |
 | PostgreSQL | 17 (Docker container for PG integration tests) |
 | SQLite | Built-in (default for unit/property/contract tests) |
-| Total tests collected | 1156 |
-| Test results (without PG) | 1145 passed, 11 skipped |
-| PG integration tests | 10 (skipped without `EP_TEST_DB_URL`; pass with it set) |
-| 11th skip | `test_pg_migration_uses_transactional_ddl` (requires PostgreSQL, not just `EP_TEST_DB_URL`) |
+| Tests collected | 1079 |
+| Passed (SQLite-only) | 1068 |
+| Skipped | 11 |
+| Failed | 0 |
+| PG integration tests | Skipped without `EP_TEST_DB_URL`; pass when set |
 | E2e tests | 4 (standalone scripts, run against live PostgreSQL) |
-| Test categories | unit (418), property (38), contract (310), integration (154), security (169), concurrency (4) |
-| Duration | ~29 seconds (SQLite), ~55 seconds (with PG integration) |
-| Skipped tests | PostgreSQL-only tests that require `EP_TEST_DB_URL` environment variable |
-| PG integration tests | Set `EP_TEST_DB_URL=postgresql://user:pass@host:port/db` and run `pytest tests/integration/test_pg_integration.py` |
-| CI | Not yet configured |
+| Test categories | unit, property, contract, integration, security, concurrency |
+| CI | GitHub Actions -- see `.github/workflows/ci.yml` |
+| Verification command | `./scripts/verify.sh` (runs lint, types, and all test categories) |
+
+Note: The test suite requires `pynacl`, `mcp`, and `hypothesis` to be installed.
+Install all dependencies with: `pip install -e ".[postgres,crypto,dev,test]"`
+
+### Proxy Support Matrix
+
+| Proxy | Authorization Validation | Real Execution | Production Status |
+|-------|:------------------------:|:---------------:|:-----------------:|
+| PostgreSQL | Full | Yes | Pilot candidate |
+| HTTP | Partial (URL validation) | No | Not implemented |
+| Shell | Classification only | No | Not implemented |
+| File | Path validation | No | Not implemented |
+| Git | Classification | No | Not implemented |
+| Docker | Classification | No | Not implemented |
+| Email | Recipient validation | No | Not implemented |
+
+Unimplemented adapters return `exit_status="not_implemented"` and `success=False`.
+They must not be enabled in production. Only the PostgreSQL proxy performs real
+execution against a target system.
 
 ## License
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from datetime import UTC, datetime
+
 
 import pytest
 import sqlalchemy as sa
@@ -34,6 +34,7 @@ from ep_governance.authorizations import KeyManager, AuthorizationEngine
 from ep_governance.transitions import TransitionEngine
 from ep_governance.branches import BranchCommitter
 from ep_governance.errors import StaleHeadError, IllegalTransitionError, SeparationOfDutiesError
+from ep_governance.deployment import EnforcementCapability
 
 
 def _build_default_policy_engine(conn):
@@ -362,6 +363,9 @@ class TestTokenReplay:
             pytest.skip("Transition did not reach authorized")
 
         payload_hash = "sha256:" + canonical_hash({"sql": "SELECT 1"})
+        capability = EnforcementCapability.for_test(
+            agent_principal_id=agent_id,
+        )
         token = auth_engine.issue_authorization(
             transition_id=transition["id"],
             agent_id=agent_id,
@@ -371,6 +375,7 @@ class TestTokenReplay:
             tool="postgres.execute",
             payload_hash=payload_hash,
             matched_policies=[],
+            enforcement_capability=capability,
         )
         conn.commit()
 

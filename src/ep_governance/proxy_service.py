@@ -40,6 +40,7 @@ from ep_governance.canonical import canonical_hash
 from ep_governance.config import load_config, OperatingMode
 from ep_governance.db.postgres import create_engine
 from ep_governance.db.repositories import PolicyRepository, BranchRepository, TransitionRepository
+from ep_governance.deployment import EnforcementCapability, EnforcementUnavailableError
 from ep_governance.policies import Policy
 from ep_governance.policy_engine import PolicyEngine
 from ep_governance.proxy.postgres_proxy import PostgresProxy
@@ -47,7 +48,16 @@ from ep_governance.proxy.base import ProxyConfig
 from ep_governance.transitions import TransitionEngine
 
 
-__all__ = ["ProxyServer", "ProxyHandler"]
+__all__ = ["ProxyServer", "ProxyHandler", "ProxyConfigurationError"]
+
+
+class ProxyConfigurationError(RuntimeError):
+    """Raised when the proxy cannot start due to a configuration error.
+
+    This is a typed exception that load_proxy_capability() raises instead
+    of calling sys.exit() directly. The main() entry point catches it and
+    converts it to a process exit.
+    """
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -98,6 +108,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 signed_token=signed_token,
                 payload=payload,
                 public_key=self.server.public_key,
+                enforcement_capability=self.server.enforcement_capability,
             )
             self._send_json(200, {
                 "success": result.success,
@@ -124,6 +135,7 @@ class ProxyServer(HTTPServer):
     proxy: PostgresProxy
     proxy_audience: str
     public_key: Any  # VerifyKey
+    enforcement_capability: EnforcementCapability
 
 
 def _load_public_key(hex_key: str) -> Any:
@@ -192,6 +204,116 @@ def _load_policy_engine(engine, branch_id: str) -> PolicyEngine | None:
             except Exception:
                 continue
         return PolicyEngine(policies) if policies else None
+
+
+def load_proxy_capability(proxy_audience: str) -> EnforcementCapability:
+    """Load and verify the proxy's enforcement capability from a signed attestation.
+
+    The proxy refuses to self-mint a capability. Instead, a deployment
+    controller signs an attestation document (JSON with a "signature" field)
+    and the proxy loads it from the file path in EP_PROXY_ATTESTATION_PATH,
+    verifying the signature against the controller public key in
+    EP_CONTROLLER_PUBLIC_KEY.
+
+    Required env vars:
+      EP_PROXY_ATTESTATION_PATH: Path to the signed attestation JSON file.
+      EP_CONTROLLER_PUBLIC_KEY: Hex-encoded Ed25519 public key of the
+        trusted deployment controller.
+
+    Required env vars (all four mandatory for attestation binding):
+      EP_PROXY_AUDIENCE: Expected proxy audience string.
+      EP_PROXY_PRINCIPAL_ID: Expected proxy principal identity.
+      EP_DEPLOYMENT_ID: Expected deployment identifier.
+      EP_PROXY_TARGET_ID: Expected target system identifier.
+
+    After loading, the capability's proxy_audience is checked against the
+    configured proxy_audience via matches_proxy_audience().
+
+    Raises ProxyConfigurationError on any configuration failure.
+    Returns the verified EnforcementCapability on success.
+    """
+    attestation_path = os.environ.get("EP_PROXY_ATTESTATION_PATH", "")
+    if not attestation_path:
+        raise ProxyConfigurationError(
+            "EP_PROXY_ATTESTATION_PATH is required — the proxy cannot "
+            "start without a signed proxy attestation. Self-minting a "
+            "capability is prohibited."
+        )
+
+    try:
+        with open(attestation_path, "r", encoding="utf-8") as f:
+            attestation_content = f.read()
+    except OSError as exc:
+        raise ProxyConfigurationError(
+            f"Failed to read attestation file {attestation_path}: {exc}"
+        ) from exc
+
+    controller_public_key_hex = os.environ.get("EP_CONTROLLER_PUBLIC_KEY", "")
+    if not controller_public_key_hex:
+        raise ProxyConfigurationError(
+            "EP_CONTROLLER_PUBLIC_KEY is required — the proxy cannot "
+            "verify the attestation signature without the trusted controller "
+            "public key."
+        )
+
+    try:
+        controller_public_key = _load_public_key(controller_public_key_hex)
+    except (ValueError, TypeError) as exc:
+        raise ProxyConfigurationError(
+            f"Failed to load controller public key: {exc}"
+        ) from exc
+
+    expected_proxy_audience = (os.environ.get("EP_PROXY_AUDIENCE", "") or "").strip() or None
+    expected_deployment_id = (os.environ.get("EP_DEPLOYMENT_ID", "") or "").strip() or None
+    expected_target_id = (os.environ.get("EP_PROXY_TARGET_ID", "") or "").strip() or None
+    expected_proxy_principal_id = (os.environ.get("EP_PROXY_PRINCIPAL_ID", "") or "").strip() or None
+
+    # All four expected bindings are mandatory for any governed proxy.
+    required_bindings = {
+        "EP_PROXY_PRINCIPAL_ID": expected_proxy_principal_id,
+        "EP_PROXY_AUDIENCE": expected_proxy_audience,
+        "EP_DEPLOYMENT_ID": expected_deployment_id,
+        "EP_PROXY_TARGET_ID": expected_target_id,
+    }
+    missing = [name for name, value in required_bindings.items() if not value]
+    if missing:
+        raise ProxyConfigurationError(
+            f"Missing required attestation bindings: {', '.join(missing)}. "
+            f"A governed proxy must verify the attestation belongs to its "
+            f"exact deployment. Configure all four bindings."
+        )
+
+    try:
+        capability = EnforcementCapability.from_signed_attestation(
+            attestation_content,
+            controller_public_key,
+            expected_proxy_audience=expected_proxy_audience,
+            expected_deployment_id=expected_deployment_id,
+            expected_target_id=expected_target_id,
+            expected_proxy_principal_id=expected_proxy_principal_id,
+        )
+    except EnforcementUnavailableError as exc:
+        raise ProxyConfigurationError(
+            f"Failed to load signed proxy attestation: {exc}"
+        ) from exc
+    except (ValueError, TypeError, KeyError) as exc:
+        raise ProxyConfigurationError(
+            f"Invalid attestation data: {exc}"
+        ) from exc
+
+    if not capability.matches_proxy_audience(proxy_audience):
+        raise ProxyConfigurationError(
+            f"Loaded capability's proxy_audience does not match the "
+            f"configured proxy audience. Expected {proxy_audience!r}, got "
+            f"{getattr(capability, 'proxy_audience', None)!r}."
+        )
+
+    print(
+        "Proxy enforcement capability loaded and verified from signed "
+        "attestation.",
+        file=sys.stderr,
+    )
+    return capability
 
 
 def main() -> None:
@@ -273,11 +395,23 @@ def main() -> None:
         policy_engine=None,  # Set per-request if needed
     )
 
+    # Load the enforcement capability from a signed proxy attestation.
+    # The proxy must NOT self-mint a capability — that would bypass the
+    # deployment controller's signature. Instead, the controller signs an
+    # attestation document and the proxy loads/verifies it at startup.
+    # See load_proxy_capability() for the encapsulated logic.
+    try:
+        proxy_capability = load_proxy_capability(proxy_audience)
+    except ProxyConfigurationError as exc:
+        print(f"FATAL: {exc}", file=sys.stderr)
+        sys.exit(1)
+
     # Start the HTTP server
     server = ProxyServer(("0.0.0.0", proxy_port), ProxyHandler)
     server.proxy = proxy
     server.proxy_audience = proxy_audience
     server.public_key = public_key
+    server.enforcement_capability = proxy_capability
 
     print(f"EP-Governance proxy listening on port {proxy_port}", file=sys.stderr)
     print(f"  Audience: {proxy_audience}", file=sys.stderr)

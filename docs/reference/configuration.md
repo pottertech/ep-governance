@@ -13,7 +13,7 @@ This page lists every supported environment variable, grouped by the component t
 | **Service** (core governance daemon) | `EP_MODE`, `EP_DB_URL`, `EP_DB_SCHEMA`, `EP_NOTIFY`, `EP_NATS_URL`, `EP_TOKEN_TTL_SECONDS`, `EP_DEV`, `EP_BOOTSTRAP_TOKEN_HASH`, `EP_SIGNING_KEY_FILE`, `EP_ALLOW_ADVISORY_EXECUTION`, `EP_REQUIRE_SIGNED_AUTHORIZATION`, `EP_FAIL_CLOSED` |
 | **Embedding** (used by Service & MCP) | `EP_EMBEDDING_PROVIDER`, `EP_EMBEDDING_MODEL`, `EP_EMBEDDING_HOST`, `EP_EMBEDDING_API_KEY` |
 | **MCP Server** | `EP_MCP_TRANSPORT`, `EP_MCP_PORT`, `EP_MCP_TLS_CERT`, `EP_MCP_TLS_KEY`, `EP_MCP_ALLOWED_HOSTS`, `EP_BOOTSTRAP_MODE` |
-| **Proxy** | `EP_PROXY_TARGET_URL`, `EP_PROXY_AUDIENCE`, `EP_PROXY_PORT`, `EP_PUBLIC_KEY`, `EP_EP_SERVICE_ID` |
+| **Proxy** | `EP_PROXY_TARGET_URL`, `EP_PROXY_AUDIENCE`, `EP_PROXY_PRINCIPAL_ID`, `EP_DEPLOYMENT_ID`, `EP_PROXY_TARGET_ID`, `EP_PROXY_PORT`, `EP_PUBLIC_KEY`, `EP_EP_SERVICE_ID`, `EP_PROXY_ATTESTATION_PATH`, `EP_CONTROLLER_PUBLIC_KEY` |
 | **CLI** | `EP_BOOTSTRAP_TOKEN` (additionally reads all Service vars via `load_config`) |
 
 ---
@@ -73,20 +73,55 @@ The proxy service (`proxy_service.py`) reads **both** the Service variables (via
 
 This is **Architecture A — direct governance access**: the proxy connects directly to the governance database to claim authorizations, advance transition stages, and report execution results. It also connects to the target database to execute SQL. The proxy holds two separate database credentials:
 
-1. **Governance DB credential** (`EP_DB_URL`): used to claim tokens, mark transitions, and write results. The proxy's governance DB user should have INSERT/UPDATE on `ep_authorizations`, `ep_transitions`, `ep_audit_heads`, and `ep_events`, but should NOT have access to target database tables.
-2. **Target DB credential** (`EP_PROXY_TARGET_URL`): used to execute SQL on behalf of agents. The proxy's target DB user (`ep_proxy_user`) should have SELECT/INSERT/UPDATE/DELETE on target tables, but should NOT have access to the `ep_governance` schema.
+1. **Governance DB** credentials — for claiming tokens and recording results.
+2. **Target DB** credentials — for executing agent SQL.
 
-The agent has **neither** credential.
+The agent has neither.
 
 | Variable | Required | Default | Secret | Description |
 |----------|----------|---------|--------|-------------|
-| `EP_DB_URL` | **yes** | *(none)* | yes | Governance DB connection string. Loaded via `load_config()`. The proxy uses this to claim authorizations and report results. |
-| `EP_DB_SCHEMA` | no | *(empty)* | no | Governance DB schema name. Loaded via `load_config()`. |
-| `EP_PROXY_TARGET_URL` | **yes** | *(none)* | yes | Target database connection string that the proxy executes queries against. |
-| `EP_PROXY_AUDIENCE` | no | `postgres-proxy` | no | Token audience string. Must match the audience that EP-Governance issues in its tokens. |
-| `EP_PROXY_PORT` | no | `8201` | no | TCP port the proxy listens on. Must be an integer. |
-| `EP_PUBLIC_KEY` | **yes** | *(none)* | no | Ed25519 public key (32 bytes encoded as 64 hexadecimal characters), used to verify governance tokens. |
-| `EP_EP_SERVICE_ID` | **yes** | *(none)* | no | XID of the EP-Governance service principal used for token issuance validation. |
+| `EP_DB_URL` | Yes | None | Yes | Governance database connection string. |
+| `EP_DB_SCHEMA` | No | Empty | No | Governance database schema. |
+| `EP_PROXY_TARGET_URL` | Yes | None | Yes | Target PostgreSQL connection string. |
+| `EP_PROXY_AUDIENCE` | Yes | None | No | Token and attestation audience (e.g., `postgres-proxy`). |
+| `EP_PROXY_PRINCIPAL_ID` | Yes | None | No | Stable identity of this proxy instance. |
+| `EP_DEPLOYMENT_ID` | Yes | None | No | Identity of the deployment receiving the attestation. |
+| `EP_PROXY_TARGET_ID` | Yes | None | No | Identity of the governed target system. |
+| `EP_PROXY_ATTESTATION_PATH` | Yes | None | No | Path inside the container to the signed attestation JSON. |
+| `EP_CONTROLLER_PUBLIC_KEY` | Yes | None | No | Hex-encoded Ed25519 public key of the trusted deployment controller. |
+| `EP_PROXY_PORT` | No | `8201` | No | Proxy listening port. |
+| `EP_PUBLIC_KEY` | Yes | None | No | Governance-token verification public key (Ed25519). |
+| `EP_EP_SERVICE_ID` | Yes | None | No | EP service principal identity (XID). |
+
+### Attestation file mounting (Docker)
+
+When deploying with Docker Compose, mount the attestation file as a
+read-only volume rather than baking it into the image:
+
+```yaml
+volumes:
+  - "${EP_PROXY_ATTESTATION_FILE:?required}:/run/ep-governance/proxy-attestation.json:ro"
+environment:
+  EP_PROXY_ATTESTATION_PATH: /run/ep-governance/proxy-attestation.json
+```
+
+Attestations expire and require rotation. Do not bake them into the
+Docker image.
+
+| Variable | Scope | Required | Description |
+|----------|-------|----------|-------------|
+| `EP_PROXY_ATTESTATION_FILE` | Host/Compose | Yes (Docker) | Host path mounted read-only into the container. |
+| `EP_PROXY_ATTESTATION_PATH` | Container/process | Yes | Path from which the proxy reads the attestation inside the container. |
+
+Preflight check before starting the proxy:
+
+```bash
+test -f "$EP_PROXY_ATTESTATION_FILE" || {
+    echo "Attestation file does not exist: $EP_PROXY_ATTESTATION_FILE"
+    exit 1
+}
+```
+
 
 ---
 

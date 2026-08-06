@@ -40,6 +40,8 @@ from ep_governance.proxy.base import ProxyConfig
 from ep_governance.branches import BranchCommitter
 from ep_governance.canonical import canonical_hash
 from ep_governance.xid import XID
+from ep_governance.deployment import EnforcementCapability
+
 
 import sqlalchemy as sa
 
@@ -145,6 +147,11 @@ def main():
         print(f"Branch: {branch_id} (head={branch_head_before}, version={branch_version_before})")
         print()
 
+    # Enforcement capability for binding enforcement
+    capability = EnforcementCapability.for_test(
+            agent_principal_id=agent_id,
+        )
+
     # Build policy engine
     policy_engine = PolicyEngine(policies)
 
@@ -219,6 +226,7 @@ def main():
         tool="postgres.execute",
         payload_hash="sha256:" + canonical_hash(payload),
         matched_policies=matched_policies_list,
+        enforcement_capability=capability,
     )
     signed_token = token.to_signed_token(km)
     print(f"  Token issued: auth_id={token.authorization_id}")
@@ -247,6 +255,7 @@ def main():
         signed_token=signed_token,
         payload=payload,
         public_key=public_key,
+        enforcement_capability=capability,
     )
     print(f"  Proxy result: success={result.success}, status={result.exit_status}")
     print(f"  Summary: {result.result_summary}")
@@ -329,6 +338,7 @@ def main():
         signed_token=signed_token,
         payload=payload,
         public_key=public_key,
+        enforcement_capability=capability,
     )
     print(f"  Reuse result: success={result3.success}, status={result3.exit_status}")
     print(f"  Summary: {result3.result_summary}")
@@ -381,6 +391,7 @@ def main():
             tool="postgres.execute",
             payload_hash="sha256:" + canonical_hash(payload4),
             matched_policies=matched_policies_list4,
+            enforcement_capability=capability,
         )
         signed_token4 = token4.to_signed_token(km)
 
@@ -392,6 +403,7 @@ def main():
             signed_token=signed_token4,
             payload=tampered_payload,
             public_key=public_key,
+            enforcement_capability=capability,
         )
         print(f"  Tamper result: success={result4.success}, status={result4.exit_status}")
         print(f"  Summary: {result4.result_summary}")

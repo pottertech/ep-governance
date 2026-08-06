@@ -40,6 +40,7 @@ from nacl.signing import SigningKey, VerifyKey
 from .canonical import canonical_hash, canonical_json, canonical_json_bytes, compute_policy_set_hash
 from .db.repositories import AuthorizationRepository, TransitionRepository
 from .db.transactions import transaction
+from .deployment import EnforcementCapability, EnforcementUnavailableError
 from .errors import (
     TokenInvalidError,
 )
@@ -48,6 +49,7 @@ from .xid import XID
 __all__ = [
     "KeyManager",
     "AuthorizationToken",
+    "AdvisoryDecision",
     "AuthorizationEngine",
 ]
 
@@ -259,6 +261,49 @@ class AuthorizationToken:
 
 
 # --------------------------------------------------------------------------- #
+# AdvisoryDecision dataclass
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class AdvisoryDecision:
+    """A non-executable advisory decision record.
+
+    This is returned by :meth:`AuthorizationEngine.record_advisory_decision`
+    when binding enforcement is not active (advisory mode). An
+    ``AdvisoryDecision`` is structurally distinct from an
+    :class:`AuthorizationToken` — it carries no signature, no nonce, and
+    cannot be claimed or executed by any proxy. A proxy must never accept
+    an ``AdvisoryDecision`` in place of a signed ``AuthorizationToken``.
+
+    Fields:
+        decision_id:     XID identifying this advisory decision.
+        transition_id:   The transition this decision covers.
+        agent_id:        The agent that requested the action.
+        project_id:      The project being acted upon.
+        branch_id:       The branch being acted upon.
+        tool:            The tool that was evaluated.
+        payload_hash:    SHA-256 hash of the canonical action payload.
+        policy_set_hash: SHA-256 hash of the effective policy set.
+        matched_policy_versions: Mapping of policy XID → version integer.
+        created_at:      ISO 8601 UTC timestamp.
+        advisory:        Always ``True`` — markers that this is advisory.
+    """
+
+    decision_id: str
+    transition_id: str
+    agent_id: str
+    project_id: str
+    branch_id: str
+    tool: str
+    payload_hash: str
+    policy_set_hash: str
+    matched_policy_versions: dict[str, int]
+    created_at: str
+    advisory: bool = True
+
+
+# --------------------------------------------------------------------------- #
 # AuthorizationEngine
 # --------------------------------------------------------------------------- #
 
@@ -306,7 +351,7 @@ class AuthorizationEngine:
         tool: str,
         payload_hash: str,
         matched_policies: list[dict[str, Any]],
-        enforcement_capability: Any = None,
+        enforcement_capability: EnforcementCapability,
     ) -> AuthorizationToken:
         """Issue a new signed authorization token.
 
@@ -321,19 +366,67 @@ class AuthorizationEngine:
             matched_policies:  List of policy dicts that matched the action.
                                Each dict should contain at least ``id`` and
                                ``activation_version`` (or ``version``).
-            enforcement_capability: Optional EnforcementCapability. When
-                               provided, require_binding_enforcement() is
-                               called before issuing the token. This ensures
-                               authorization issuance only happens when
-                               binding enforcement is verified active.
+            enforcement_capability: **Required.** An :class:`EnforcementCapability`
+                               from :func:`verify_deployment`. The capability
+                               must have binding enforcement active, and its
+                               ``agent_principal_id`` must match ``agent_id``.
+                               This ensures authorization issuance only happens
+                               when binding enforcement is verified active AND
+                               the capability is bound to the same agent that
+                               the token is being issued for.
 
         Returns:
             A signed :class:`AuthorizationToken`.  The caller passes this
             to the agent, who passes it to the proxy.
+
+        Raises:
+            EnforcementUnavailableError: If binding enforcement is not active
+                or if the capability's agent_principal_id does not match
+                agent_id.
         """
-        # Enforcement capability check at authorization issuance boundary.
-        if enforcement_capability is not None:
-            enforcement_capability.require_binding_enforcement()
+        # --- Enforcement capability checks (Finding 1 + Finding 3) -------
+        # The capability is MANDATORY. No default, no optional bypass.
+        # 1a. Require binding enforcement to be active.
+        enforcement_capability.require_binding_enforcement()
+
+        # 1b. Identity binding.
+        #     For agent-scoped capabilities: the capability's
+        #     agent_principal_id must match the agent_id being issued
+        #     the token. This prevents a capability for Agent A from
+        #     being used to issue a token for Agent B.
+        #
+        #     For proxy-scoped capabilities: the capability attests that
+        #     the proxy deployment provides binding enforcement. The EP
+        #     service uses this capability to issue tokens on behalf of
+        #     any agent whose action has been policy-approved. The proxy
+        #     scope is validated (proxy_scoped=True, proxy_audience set,
+        #     supports the requested tool) instead of requiring a literal
+        #     agent ID match.
+        if not enforcement_capability.proxy_scoped:
+            # Agent-scoped: require exact agent identity match.
+            if enforcement_capability.agent_principal_id != agent_id:
+                raise EnforcementUnavailableError(
+                    f"Capability agent_principal_id "
+                    f"({enforcement_capability.agent_principal_id}) does not match "
+                    f"authorization agent_id ({agent_id}). The capability must be "
+                    f"bound to the same agent that the token is issued for."
+                )
+        else:
+            # Proxy-scoped: validate the proxy scope is properly configured.
+            # The capability must have proxy_audience and support the tool.
+            enforcement_capability.require_proxy_scoped()
+            # The capability's proxy_audience must match the token's audience.
+            if enforcement_capability.proxy_audience != proxy_audience:
+                raise EnforcementUnavailableError(
+                    f"Capability proxy_audience "
+                    f"({enforcement_capability.proxy_audience}) does not match "
+                    f"authorization proxy_audience ({proxy_audience})."
+                )
+            if not enforcement_capability.supports_action_type(tool):
+                raise EnforcementUnavailableError(
+                    f"Proxy-scoped capability does not support tool '{tool}'. "
+                    f"Supported types: {enforcement_capability.supported_action_types}"
+                )
 
         # 1. Generate identifiers and nonce.
         authorization_id = str(XID.new())
@@ -405,6 +498,69 @@ class AuthorizationEngine:
 
         # 8. Return the signed token for the agent → proxy handoff.
         return token
+
+    def record_advisory_decision(
+        self,
+        transition_id: str,
+        agent_id: str,
+        project_id: str,
+        branch_id: str,
+        tool: str,
+        payload_hash: str,
+        matched_policies: list[dict[str, Any]],
+    ) -> AdvisoryDecision:
+        """Record a non-executable advisory decision.
+
+        This is the advisory-mode counterpart to :meth:`issue_authorization`.
+        It does NOT create a signed token, does NOT interact with the
+        authorization table, and the returned :class:`AdvisoryDecision`
+        cannot be claimed or executed by any proxy.
+
+        Use this when binding enforcement is not active (advisory mode).
+        A proxy must never accept an ``AdvisoryDecision`` in place of a
+        signed ``AuthorizationToken``.
+
+        Args:
+            transition_id:    The transition this decision covers.
+            agent_id:          The agent that requested the action.
+            project_id:        The project being acted upon.
+            branch_id:         The branch being acted upon.
+            tool:              The tool that was evaluated.
+            payload_hash:      SHA-256 of the canonical action payload.
+            matched_policies:  List of policy dicts that matched.
+
+        Returns:
+            An :class:`AdvisoryDecision` record (non-executable).
+        """
+        decision_id = str(XID.new())
+
+        matched_policy_versions: dict[str, int] = {}
+        for policy in matched_policies:
+            pid = policy.get("id") or policy.get("policy_id")
+            if pid is None:
+                continue
+            version = policy.get("activation_version")
+            if version is None:
+                version = policy.get("version", 0)
+            matched_policy_versions[str(pid)] = int(version)
+
+        policy_set_hash = compute_policy_set_hash(matched_policy_versions)
+        now = datetime.now(UTC)
+        created_at = now.strftime("%Y-%m-%dT%H:%M:%S.%f") + "Z"
+
+        return AdvisoryDecision(
+            decision_id=decision_id,
+            transition_id=transition_id,
+            agent_id=agent_id,
+            project_id=project_id,
+            branch_id=branch_id,
+            tool=tool,
+            payload_hash=payload_hash,
+            policy_set_hash=policy_set_hash,
+            matched_policy_versions=matched_policy_versions,
+            created_at=created_at,
+            advisory=True,
+        )
 
     # ------------------------------------------------------------------ #
     # Lookup

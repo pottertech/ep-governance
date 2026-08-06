@@ -224,12 +224,10 @@ class EmailProxy(GovernedProxy):
         )
 
         return ExecutionResult(
-            success=True,
-            exit_status="success",
-            result_summary=(
-                f"Simulated email send to {total_recipients} recipient(s) — subject: {subject}"
-            ),
-            output=self._enforce_output_limit(simulated_output),
+            success=False,
+            exit_status="not_implemented",
+            result_summary="Email execution adapter is not implemented",
+            output=None,
             redacted=True,  # body is not included in summary
         )
 

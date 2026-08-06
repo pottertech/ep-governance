@@ -16,7 +16,7 @@ Gate criteria from directive:
 from __future__ import annotations
 
 import os
-from datetime import datetime, timezone
+
 
 import pytest
 import sqlalchemy as sa
@@ -42,6 +42,7 @@ from ep_governance.proxy.base import ProxyConfig, ExecutionResult
 from ep_governance.proxy.postgres_proxy import PostgresProxy
 from ep_governance.canonical import canonical_hash
 from ep_governance.errors import StaleHeadError
+from ep_governance.deployment import EnforcementCapability
 
 
 def _build_default_policy_engine(conn):
@@ -77,6 +78,16 @@ def _build_default_policy_engine(conn):
 
 def _get_db_url() -> str:
     return os.environ.get("EP_TEST_DB_URL", "sqlite:///:memory:")
+
+
+def _proxy_scoped_capability():
+    """Create a proxy-scoped enforcement capability for proxy.execute calls."""
+    return EnforcementCapability.for_test(
+            agent_principal_id="proxy",
+            proxy_scoped=True,
+            proxy_principal_id="proxy",
+            proxy_audience="postgres-proxy",
+        )
 
 
 @pytest.fixture
@@ -239,6 +250,10 @@ def _propose_and_authorize(
 
     payload_hash = "sha256:" + canonical_hash(arguments)
 
+    capability = EnforcementCapability.for_test(
+            agent_principal_id=agent_id,
+        )
+
     token = auth_engine.issue_authorization(
         transition_id=transition["id"],
         agent_id=agent_id,
@@ -248,6 +263,7 @@ def _propose_and_authorize(
         tool=tool,
         payload_hash=payload_hash,
         matched_policies=[],
+        enforcement_capability=capability,
     )
     conn.commit()
     return transition, token
@@ -277,7 +293,14 @@ class TestProxyTokenVerification:
         payload = {"sql": "SELECT 1", "host": "localhost", "database": "test"}
         payload_hash = "sha256:" + canonical_hash(payload)
 
-        result = proxy.execute(signed, payload, key_manager.public_key)
+        capability_exec = EnforcementCapability.for_test(
+            agent_principal_id="proxy",
+            proxy_scoped=True,
+            proxy_principal_id="proxy",
+            proxy_audience="postgres-proxy",
+        )
+
+        result = proxy.execute(signed, payload, key_manager.public_key, enforcement_capability=capability_exec)
         assert result.exit_status == "success"
         assert result.success is True
 
@@ -300,7 +323,7 @@ class TestProxyTokenVerification:
         altered_payload = {"sql": "DROP TABLE memory_items", "host": "localhost"}
 
         # The proxy now computes the hash internally — no caller-supplied hash
-        result = proxy.execute(signed, altered_payload, key_manager.public_key)
+        result = proxy.execute(signed, altered_payload, key_manager.public_key, enforcement_capability=_proxy_scoped_capability())
         assert result.success is False
         assert "mismatch" in result.result_summary.lower()
 
@@ -323,7 +346,14 @@ class TestProxyTokenVerification:
         payload_hash = "sha256:" + canonical_hash(payload)
 
         # First execution succeeds
-        result1 = proxy.execute(signed, payload, key_manager.public_key)
+        capability_exec1 = EnforcementCapability.for_test(
+            agent_principal_id="proxy",
+            proxy_scoped=True,
+            proxy_principal_id="proxy",
+            proxy_audience="postgres-proxy",
+        )
+
+        result1 = proxy.execute(signed, payload, key_manager.public_key, enforcement_capability=capability_exec1)
         conn.commit()
         assert result1.success is True
 
@@ -331,7 +361,14 @@ class TestProxyTokenVerification:
         # token is already claimed, or because the transition has moved
         # out of the 'authorized' stage (the new pre-execution stage
         # check catches this before the claim attempt).
-        result2 = proxy.execute(signed, payload, key_manager.public_key)
+        capability_exec2 = EnforcementCapability.for_test(
+            agent_principal_id="proxy",
+            proxy_scoped=True,
+            proxy_principal_id="proxy",
+            proxy_audience="postgres-proxy",
+        )
+
+        result2 = proxy.execute(signed, payload, key_manager.public_key, enforcement_capability=capability_exec2)
         conn.commit()
         assert result2.success is False
         assert (
@@ -368,7 +405,14 @@ class TestProxyTokenVerification:
         payload = {"sql": "SELECT 1", "host": "localhost", "database": "test"}
         payload_hash = "sha256:" + canonical_hash(payload)
 
-        result = wrong_proxy.execute(signed, payload, key_manager.public_key)
+        capability_wrong = EnforcementCapability.for_test(
+            agent_principal_id="proxy",
+            proxy_scoped=True,
+            proxy_principal_id="proxy",
+            proxy_audience="postgres-proxy",
+        )
+
+        result = wrong_proxy.execute(signed, payload, key_manager.public_key, enforcement_capability=capability_wrong)
         assert result.success is False
         assert "audience" in result.result_summary.lower()
 
@@ -393,7 +437,14 @@ class TestProxySQLClassification:
         payload = {"sql": "SELECT 1 as result", "host": "localhost"}
         payload_hash = "sha256:" + canonical_hash(payload)
 
-        result = proxy.execute(signed, payload, key_manager.public_key)
+        capability_exec = EnforcementCapability.for_test(
+            agent_principal_id="proxy",
+            proxy_scoped=True,
+            proxy_principal_id="proxy",
+            proxy_audience="postgres-proxy",
+        )
+
+        result = proxy.execute(signed, payload, key_manager.public_key, enforcement_capability=capability_exec)
         assert result.success is True
         assert result.exit_status == "success"
 
@@ -418,7 +469,14 @@ class TestProxySQLClassification:
         payload = {"sql": "TRUNCATE TABLE ep_projects", "host": "localhost"}
         payload_hash = "sha256:" + canonical_hash(payload)
 
-        result = proxy.execute(signed, payload, key_manager.public_key)
+        capability_exec = EnforcementCapability.for_test(
+            agent_principal_id="proxy",
+            proxy_scoped=True,
+            proxy_principal_id="proxy",
+            proxy_audience="postgres-proxy",
+        )
+
+        result = proxy.execute(signed, payload, key_manager.public_key, enforcement_capability=capability_exec)
         assert result.success is False
         assert "forbidden" in result.result_summary.lower()
 
@@ -446,7 +504,14 @@ class TestProxySQLClassification:
         payload = {"host": "localhost"}
         payload_hash = "sha256:" + canonical_hash({"sql": "SELECT 1", "host": "localhost"})
 
-        result = proxy.execute(signed, payload, key_manager.public_key)
+        capability_exec = EnforcementCapability.for_test(
+            agent_principal_id="proxy",
+            proxy_scoped=True,
+            proxy_principal_id="proxy",
+            proxy_audience="postgres-proxy",
+        )
+
+        result = proxy.execute(signed, payload, key_manager.public_key, enforcement_capability=capability_exec)
         assert result.success is False
         assert (
             "no sql" in result.result_summary.lower() or "mismatch" in result.result_summary.lower()
@@ -475,7 +540,14 @@ class TestProxyResultFlow:
         payload = {"sql": "SELECT 1 as val", "host": "localhost"}
         payload_hash = "sha256:" + canonical_hash(payload)
 
-        result = proxy.execute(signed, payload, key_manager.public_key)
+        capability_exec = EnforcementCapability.for_test(
+            agent_principal_id="proxy",
+            proxy_scoped=True,
+            proxy_principal_id="proxy",
+            proxy_audience="postgres-proxy",
+        )
+
+        result = proxy.execute(signed, payload, key_manager.public_key, enforcement_capability=capability_exec)
         conn.commit()
         assert result.success is True
         assert result.rows_affected >= 1
@@ -501,7 +573,14 @@ class TestProxyResultFlow:
         payload = {"sql": "SELECT 1", "host": "localhost"}
         payload_hash = "sha256:" + canonical_hash(payload)
 
-        result = proxy.execute(signed, payload, key_manager.public_key)
+        capability_exec = EnforcementCapability.for_test(
+            agent_principal_id="proxy",
+            proxy_scoped=True,
+            proxy_principal_id="proxy",
+            proxy_audience="postgres-proxy",
+        )
+
+        result = proxy.execute(signed, payload, key_manager.public_key, enforcement_capability=capability_exec)
         conn.commit()
 
         # Check the transition stage was advanced to executing by the claim

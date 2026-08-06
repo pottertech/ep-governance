@@ -92,23 +92,11 @@ class HTTPProxy(GovernedProxy):
                 result_summary=f"URL parsing error: {exc!s}",
             )
 
-        # Simulated execution
-        headers = payload.get("headers", {})
-        body = payload.get("body", "")
-
-        # Redact sensitive headers
-        redacted_headers = {}
-        for k, v in headers.items():
-            if k.lower() in ("authorization", "x-api-key", "cookie", "set-cookie"):
-                redacted_headers[k] = "***REDACTED***"
-            else:
-                redacted_headers[k] = v
-
+        # Execution adapter is not implemented — return failure so the
+        # governance graph does not record a no-op as success.
         return ExecutionResult(
-            success=True,
-            exit_status="success",
-            result_summary=f"Would send HTTP {method} to {url}",
-            output=self._enforce_output_limit(
-                f"[simulated] {method} {url}\nHeaders: {redacted_headers}\nBody length: {len(str(body))}"
-            ),
+            success=False,
+            exit_status="not_implemented",
+            result_summary="HTTP execution adapter is not implemented",
+            output=None,
         )

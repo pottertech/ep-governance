@@ -44,6 +44,7 @@ from ep_governance.policies import Policy
 from ep_governance.policy_engine import PolicyEngine
 from ep_governance.transitions import TransitionEngine
 from ep_governance.xid import XID
+from ep_governance.deployment import EnforcementCapability
 
 
 def _get_db_url() -> str:
@@ -210,6 +211,9 @@ class TestStressTokenClaim:
             pytest.skip("Transition did not reach authorized")
 
         payload_hash = "sha256:" + canonical_hash({"sql": "SELECT 1"})
+        capability = EnforcementCapability.for_test(
+            agent_principal_id=agent_id,
+        )
         token = auth_engine.issue_authorization(
             transition_id=transition["id"],
             agent_id=agent_id,
@@ -219,6 +223,7 @@ class TestStressTokenClaim:
             tool="postgres.execute",
             payload_hash=payload_hash,
             matched_policies=[],
+            enforcement_capability=capability,
         )
         signed_token = token.to_signed_token(km)
 

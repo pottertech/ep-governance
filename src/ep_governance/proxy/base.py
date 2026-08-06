@@ -34,6 +34,7 @@ from ..canonical import canonical_hash, compute_policy_set_hash
 from ..classification import get_classifier
 from ..db.repositories import BranchRepository
 from ..db.transactions import serializable_transaction
+from ..deployment import EnforcementCapability, EnforcementUnavailableError
 from ..errors import EPError, IllegalTransitionError
 from ..policy_engine import PolicyEngine
 from ..transitions import TransitionEngine
@@ -110,45 +111,53 @@ class GovernedProxy(ABC):
         signed_token: str,
         payload: dict[str, Any],
         public_key: Any,
-        enforcement_capability: Any = None,
+        enforcement_capability: EnforcementCapability,
     ) -> ExecutionResult:
         """Execute a governed action.
 
         This is the main entry point. The proxy:
-        1. Verifies the token signature
-        2. Computes the payload hash from the actual payload (NOT caller-supplied)
-        3. Verifies the computed hash matches the authorized payload hash
-        4. Verifies proxy audience
-        5. Checks for stale authorization (policy set changes)
-        6. Atomically claims the authorization
+        1. Verifies the enforcement capability (mandatory, identity-bound)
+        2. Verifies the token signature
+        3. Computes the payload hash from the actual payload (NOT caller-supplied)
+        4. Verifies the computed hash matches the authorized payload hash
+        5. Verifies proxy audience
+        6. Checks for stale authorization (policy set changes)
+        7. Atomically claims the authorization
 
-        When enforcement_capability is provided, require_binding_enforcement()
-        is called before any execution. This is the per-operation enforcement
-        boundary at the proxy level.
-        7. Executes the action through the bounded adapter
-        8. Returns the result
+        The enforcement_capability is MANDATORY. It must have binding
+        enforcement active, and its agent_principal_id must match the
+        token's agent_id. This is the per-operation enforcement boundary
+        at the proxy level — even if the launcher verified deployment
+        isolation, each proxy execution independently confirms that
+        binding enforcement is still active AND the capability is bound
+        to the same agent that the token was issued to.
+
+        8. Executes the action through the bounded adapter
+        9. Returns the result
 
         Args:
             signed_token: The signed authorization token JSON string.
             payload: The actual payload to execute. The proxy computes the hash.
             public_key: The Ed25519 public key for signature verification.
+            enforcement_capability: **Required.** An
+                :class:`EnforcementCapability` from
+                :func:`verify_deployment`. Must have binding enforcement
+                active and be bound to the same agent as the token.
 
         Returns:
             ExecutionResult with success/failure/timeout status.
         """
-        # Enforcement capability check at proxy execution boundary.
-        # This is the per-operation enforcement check — even if the launcher
-        # verified deployment isolation, each proxy execution independently
-        # confirms that binding enforcement is still active.
-        if enforcement_capability is not None:
-            try:
-                enforcement_capability.require_binding_enforcement()
-            except Exception as exc:
-                return ExecutionResult(
-                    success=False,
-                    exit_status="failure",
-                    result_summary=f"Enforcement capability check failed: {exc}",
-                )
+        # --- Enforcement capability checks (Finding 2 + Finding 4) -------
+        # The capability is MANDATORY. No default, no optional bypass.
+        # 2a. Require binding enforcement to be active.
+        try:
+            enforcement_capability.require_binding_enforcement()
+        except Exception as exc:
+            return ExecutionResult(
+                success=False,
+                exit_status="failure",
+                result_summary=f"Enforcement capability check failed: {exc}",
+            )
 
         attempt_id = str(XID.new())
         started_at = self._now_iso()
@@ -164,6 +173,64 @@ class GovernedProxy(ABC):
                 started_at=started_at,
                 completed_at=self._now_iso(),
             )
+
+        # Step 1b: Identity binding (Finding 4)
+        # The capability's agent_principal_id must match the token's
+        # agent_id. This prevents a capability created for Agent A from
+        # being used to execute a token issued to Agent B.
+        # Exception: proxy-scoped capabilities (used by the proxy service
+        # itself) represent the proxy process, not a specific agent. The
+        # proxy verifies any agent whose token signature is valid, so the
+        # identity binding check is skipped for proxy-scoped capabilities.
+        # However, proxy-scoped capabilities must have their own identity
+        # constraints verified (Finding 2):
+        #   - proxy_audience must match the token's audience
+        #   - the capability must support the token's tool
+        if not enforcement_capability.proxy_scoped:
+            if enforcement_capability.agent_principal_id != token.agent_id:
+                return ExecutionResult(
+                    success=False,
+                    exit_status="failure",
+                    result_summary=(
+                        f"Capability agent_principal_id "
+                        f"({enforcement_capability.agent_principal_id}) does not match "
+                        f"token agent_id ({token.agent_id}). The capability must be "
+                        f"bound to the same agent that the token was issued to."
+                    ),
+                    execution_attempt_id=attempt_id,
+                    started_at=started_at,
+                    completed_at=self._now_iso(),
+                )
+        else:
+            # Proxy-scoped capability identity checks (Finding 2).
+            # The capability's proxy_audience must match the token's audience.
+            if enforcement_capability.proxy_audience and token.proxy_audience != enforcement_capability.proxy_audience:
+                return ExecutionResult(
+                    success=False,
+                    exit_status="failure",
+                    result_summary=(
+                        f"Proxy-scoped capability audience mismatch: capability "
+                        f"has proxy_audience='{enforcement_capability.proxy_audience}' "
+                        f"but token has audience='{token.proxy_audience}'"
+                    ),
+                    execution_attempt_id=attempt_id,
+                    started_at=started_at,
+                    completed_at=self._now_iso(),
+                )
+            # The capability must support the token's tool type.
+            if not enforcement_capability.supports_action_type(token.tool):
+                return ExecutionResult(
+                    success=False,
+                    exit_status="failure",
+                    result_summary=(
+                        f"Proxy-scoped capability does not support tool "
+                        f"'{token.tool}'. Supported types: "
+                        f"{enforcement_capability.supported_action_types}"
+                    ),
+                    execution_attempt_id=attempt_id,
+                    started_at=started_at,
+                    completed_at=self._now_iso(),
+                )
 
         # Step 2: Compute payload hash from the ACTUAL payload (Critical fix 1)
         # The caller MUST NOT supply the hash — the proxy derives it.

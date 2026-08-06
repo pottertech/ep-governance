@@ -209,14 +209,39 @@ Both roles are created `NOLOGIN` — no passwords in migrations. Credentials are
 
 | Role | Login? | Purpose |
 |------|--------|---------|
-| `ep_proxy` | NOLOGIN | Group role. Granted `CONNECT` on target databases. Explicitly denied access to the `ep_governance` schema (`REVOKE ALL ON SCHEMA ep_governance`). |
-| `ep_proxy_user` | LOGIN | Login role that inherits `ep_proxy`. This is the account the proxy uses to connect to target databases. |
+| `ep_proxy` | NOLOGIN | Group role. Target database CONNECT grants are provisioned separately. Explicitly denied access to the `ep_governance` schema (`REVOKE ALL ON SCHEMA ep_governance`). |
+| `ep_proxy_user` | NOLOGIN | Compatibility group member. No credential. The actual runtime login is provisioned separately. |
 
 **Security properties:**
 
-- `ep_proxy_user` can connect to target databases but **cannot** see the governance schema.
-- The agent must **not** have the `ep_proxy` role and must **not** have `ep_proxy_user` credentials.
-- The migration ships with a placeholder password (`change_me_in_production`). **Change it before deploying.** In production, inject the real password via a secret manager or certificate-based auth.
+- `ep_proxy` can connect to target databases (when granted) but **cannot** see the governance schema.
+- The agent must **not** have the `ep_proxy` role and must **not** have any proxy credentials.
+- The migration does NOT create a login role with a password. The runtime login credential must be provisioned separately through a secret manager or deployment tool.
+
+### Provisioning the proxy runtime login
+
+The migration creates `ep_proxy` and `ep_proxy_user` as NOLOGIN roles. To create the actual runtime login, use a deployment tool or psql with a secret-injected password:
+
+```sql
+-- Run as a superuser on the governance DB cluster
+-- Use a secret manager or psql variable to inject the password:
+-- psql -v proxy_password="$PROXY_PASSWORD" -f provision-proxy-login.sql
+CREATE ROLE ep_proxy_runtime
+    LOGIN PASSWORD :'proxy_password'
+    IN ROLE ep_proxy;
+```
+
+Or preferably use certificate-based authentication:
+
+```sql
+CREATE ROLE ep_proxy_runtime
+    LOGIN
+    IN ROLE ep_proxy;
+-- Configure certificate auth in pg_hba.conf:
+-- hostssl target_db  ep_proxy_runtime  <proxy_host>/32  cert
+```
+
+Target database CONNECT grants must also be provisioned separately. See `deployment/examples/grant-proxy-target.sql` for a template.
 
 ### Applying the migrations
 
@@ -235,13 +260,6 @@ psql "postgresql://admin_user:***@10.0.0.10:5432/target_db" <<'SQL'
 GRANT USAGE ON SCHEMA public TO ep_proxy;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO ep_proxy;
 SQL
-```
-
-### Setting the production password for `ep_proxy_user`
-
-```sql
--- Run as a superuser on the governance DB
-ALTER ROLE ep_proxy_user PASSWORD 's3cur3-pr0d-p%40ssw0rd';
 ```
 
 ---
@@ -263,18 +281,28 @@ chmod 0600 .env.proxy
 # Edit .env.proxy with real values (see §10 for full reference)
 ```
 
-Example `.env.proxy` (neutral values):
+Example `.env.proxy` (placeholder values — replace before use):
 
 ```dotenv
-EP_DB_URL=postgresql://gov_user:gov%40ssword@100.64.0.10:5432/governance_db
+EP_DB_URL=<required-governance-database-url>
 EP_DB_SCHEMA=ep_governance
-EP_MODE=enforced
-EP_PROXY_TARGET_URL=postgresql://ep_proxy_user:tgt%40ssword@100.64.0.10:5432/target_db
+EP_PROXY_TARGET_URL=<required-target-database-url>
+
 EP_PROXY_AUDIENCE=postgres-proxy
-EP_PROXY_PORT=8201
-EP_EP_SERVICE_ID=d9ll4o7ug6j0oak02ck0
-EP_PUBLIC_KEY=<hex-encoded Ed25519 public key>
+EP_PROXY_PRINCIPAL_ID=<proxy-principal-xid>
+EP_DEPLOYMENT_ID=<deployment-identifier>
+EP_PROXY_TARGET_ID=<target-system-identifier>
+
+EP_EP_SERVICE_ID=<ep-service-principal-xid>
+EP_PUBLIC_KEY=<governance-token-verification-public-key-hex>
+EP_CONTROLLER_PUBLIC_KEY=<controller-attestation-verification-public-key-hex>
+
+EP_PROXY_ATTESTATION_FILE=<host-path-to-attestation-json>
 ```
+
+Note: `EP_MODE` and `EP_PROXY_PORT` are hard-coded in the Compose file
+as `enforced` and `8201` respectively. Setting them in `.env.proxy` has
+no effect unless the Compose file is modified to interpolate them.
 
 ### Launch with docker-compose
 
@@ -1212,7 +1240,14 @@ docker exec ep-governance-proxy env | grep EP_MODE
 # Expected: EP_MODE=enforced
 
 # Attempt to start the proxy with EP_MODE=advisory (should fail):
-EP_MODE=advisory docker compose -f docker/proxy/docker-compose.proxy.yml up
+# Use a Compose override to test advisory-mode rejection:
+cat > /tmp/advisory-override.yml << 'EOF'
+services:
+  ep-proxy:
+    environment:
+      EP_MODE: advisory
+EOF
+docker compose -f docker/proxy/docker-compose.proxy.yml -f /tmp/advisory-override.yml --env-file .env.proxy up
 # Expected: ConfigError: Advisory mode is not permitted in production.
 
 # Confirm signed authorization is required (unsigned request rejected):

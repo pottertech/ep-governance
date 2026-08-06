@@ -21,7 +21,7 @@ pytest tests/property -v
 echo "=== Contract tests ==="
 pytest tests/contracts -v
 
-echo "=== Integration tests (requires PostgreSQL on :5433) ==="
+echo "=== Integration tests (PostgreSQL on :5432 via CI service, or :5433 for local NAS) ==="
 pytest tests/integration -v
 
 echo "=== Concurrency tests ==="

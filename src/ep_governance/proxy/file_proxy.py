@@ -127,60 +127,55 @@ class FileProxy(GovernedProxy):
             )
 
     def _do_read(self, path: str) -> ExecutionResult:
-        """Read file contents (simulated)."""
-        # In production, this would read the actual file
-        # For now, return a simulated result
+        """Read file contents — adapter not implemented."""
         return ExecutionResult(
-            success=True,
-            exit_status="success",
-            result_summary=f"Would read file: {path}",
-            output=f"[simulated] Contents of {path}",
+            success=False,
+            exit_status="not_implemented",
+            result_summary="File execution adapter is not implemented",
+            output=None,
         )
 
     def _do_list(self, path: str) -> ExecutionResult:
-        """List directory contents (simulated)."""
+        """List directory contents — adapter not implemented."""
         return ExecutionResult(
-            success=True,
-            exit_status="success",
-            result_summary=f"Would list directory: {path}",
-            output=f"[simulated] Listing of {path}",
+            success=False,
+            exit_status="not_implemented",
+            result_summary="File execution adapter is not implemented",
+            output=None,
         )
 
     def _do_stat(self, path: str) -> ExecutionResult:
-        """Get file metadata (simulated)."""
+        """Get file metadata — adapter not implemented."""
         return ExecutionResult(
-            success=True,
-            exit_status="success",
-            result_summary=f"Would stat: {path}",
-            output=f"[simulated] Stat of {path}",
+            success=False,
+            exit_status="not_implemented",
+            result_summary="File execution adapter is not implemented",
+            output=None,
         )
 
     def _do_write(self, path: str, payload: dict[str, Any], operation: str) -> ExecutionResult:
-        """Write/create/append to a file (simulated)."""
-        content = payload.get("content", "")
-        content_preview = content[:100] if content else ""
+        """Write/create/append to a file — adapter not implemented."""
         return ExecutionResult(
-            success=True,
-            exit_status="success",
-            result_summary=f"Would {operation} to file: {path} (content length: {len(content)})",
-            output=f"[simulated] {operation} to {path}",
+            success=False,
+            exit_status="not_implemented",
+            result_summary="File execution adapter is not implemented",
+            output=None,
         )
 
     def _do_move(self, path: str, payload: dict[str, Any]) -> ExecutionResult:
-        """Move a file (simulated)."""
-        dest = payload.get("destination", "")
+        """Move a file — adapter not implemented."""
         return ExecutionResult(
-            success=True,
-            exit_status="success",
-            result_summary=f"Would move {path} to {dest}",
-            output=f"[simulated] Moved {path} -> {dest}",
+            success=False,
+            exit_status="not_implemented",
+            result_summary="File execution adapter is not implemented",
+            output=None,
         )
 
     def _do_delete(self, path: str) -> ExecutionResult:
-        """Delete a file (simulated)."""
+        """Delete a file — adapter not implemented."""
         return ExecutionResult(
-            success=True,
-            exit_status="success",
-            result_summary=f"Would delete: {path}",
-            output=f"[simulated] Deleted {path}",
+            success=False,
+            exit_status="not_implemented",
+            result_summary="File execution adapter is not implemented",
+            output=None,
         )
