@@ -38,6 +38,7 @@ dependencies = [
 [project.optional-dependencies]
 postgres = ["psycopg[binary]>=3.1", "asyncpg>=0.29"]
 crypto = ["cryptography>=42.0"]
+cel = ["cel-python>=0.5"]
 dev = [
     "ruff>=0.4",
     "mypy>=1.10",
@@ -49,6 +50,7 @@ test = [
     "hypothesis>=6.100",
     "testcontainers[postgres]>=4.0",
     "docker-compose>=1.5",
+    "cel-python>=0.5",
 ]
 verification = [
     "ruff>=0.4",

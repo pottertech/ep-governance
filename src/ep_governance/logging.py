@@ -117,7 +117,7 @@ def _wrap_logger(logger: logging.Logger) -> None:
     Transforms: log.info("msg", key=value)
     Into:       log.info("msg", extra={"key": value})
     """
-    for level_name in ("debug", "info", "warning", "warn", "error", "critical", "exception"):
+    for level_name in ("debug", "info", "warning", "error", "critical", "exception"):
         original = getattr(logger, level_name, None)
         if original is None:
             continue

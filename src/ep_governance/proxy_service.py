@@ -55,7 +55,7 @@ from ep_governance.transitions import TransitionEngine
 log = get_logger("proxy")
 
 
-__all__ = ["ProxyServer", "ProxyHandler", "ProxyConfigurationError"]
+__all__ = ["ProxyServer", "ProxyHandler", "ProxyConfigurationError", "load_proxy_targets"]
 
 
 class ProxyConfigurationError(RuntimeError):
@@ -65,6 +65,60 @@ class ProxyConfigurationError(RuntimeError):
     of calling sys.exit() directly. The main() entry point catches it and
     converts it to a process exit.
     """
+
+
+def load_proxy_targets() -> dict[str, str]:
+    """Load multiple proxy target databases from a config file.
+
+    Reads the file path from the ``EP_PROXY_TARGETS_FILE`` environment
+    variable. The file must be JSON with a mapping of database names to
+    connection strings, e.g.::
+
+        {
+            "analytics": "postgresql+psycopg://user:pass@host/analytics",
+            "metadata": "postgresql+psycopg://user:pass@host/metadata"
+        }
+
+    Returns an empty dict if ``EP_PROXY_TARGETS_FILE`` is not set or the
+    file does not exist. Raises ``ProxyConfigurationError`` if the file
+    exists but cannot be parsed.
+    """
+    targets_file = os.environ.get("EP_PROXY_TARGETS_FILE", "")
+    if not targets_file:
+        return {}
+
+    if not os.path.isfile(targets_file):
+        log.warning("targets_file_not_found", extra={"path": targets_file})
+        return {}
+
+    try:
+        with open(targets_file, "r", encoding="utf-8") as f:
+            targets = json.load(f)
+    except OSError as exc:
+        raise ProxyConfigurationError(
+            f"Failed to read targets file {targets_file}: {exc}"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise ProxyConfigurationError(
+            f"Failed to parse targets file {targets_file}: {exc}"
+        ) from exc
+
+    if not isinstance(targets, dict):
+        raise ProxyConfigurationError(
+            f"Targets file {targets_file} must contain a JSON object "
+            f"(mapping of database names to connection strings)"
+        )
+
+    # Validate that all values are strings (connection strings)
+    for name, conn_str in targets.items():
+        if not isinstance(name, str) or not isinstance(conn_str, str):
+            raise ProxyConfigurationError(
+                f"Targets file {targets_file} contains invalid entry: "
+                f"keys and values must be strings"
+            )
+
+    log.info("targets_loaded", extra={"count": len(targets), "databases": list(targets.keys())})
+    return targets
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
@@ -82,11 +136,20 @@ class ProxyHandler(BaseHTTPRequestHandler):
         if self.path == "/health":
             self._send_json(200, {"status": "ok", "service": "ep-governance-proxy"})
         elif self.path == "/info":
-            self._send_json(200, {
+            info = {
                 "service": "ep-governance-proxy",
                 "audience": self.server.proxy_audience,
                 "target": "postgresql",
-            })
+            }
+            # Include multi-target database list if configured
+            proxy = getattr(self.server, "proxy", None)
+            proxy_targets = getattr(proxy.config, "targets", None) if proxy else None
+            if proxy_targets:
+                info["databases"] = list(proxy_targets.keys())
+                info["multi_target"] = True
+            else:
+                info["multi_target"] = False
+            self._send_json(200, info)
         elif self.path == "/metrics":
             metrics = getattr(self.server, "metrics", None)
             if metrics:
@@ -110,7 +173,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         client_ip = self.client_address[0] if self.client_address else "unknown"
         rate_limiter = getattr(self.server, "rate_limiter", None)
         if rate_limiter and not rate_limiter.check(client_ip):
-            log.warn("rate_limited", client_ip=client_ip,
+            log.warning("rate_limited", client_ip=client_ip,
                      max=rate_limiter.max_requests, window=rate_limiter.window_seconds)
             metrics = getattr(self.server, "metrics", None)
             if metrics:
@@ -139,7 +202,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         payload = request.get("payload")
 
         if not signed_token or not payload:
-            log.warn("missing_fields", client_ip=client_ip)
+            log.warning("missing_fields", client_ip=client_ip)
             self._send_json(400, {"error": "Missing signed_token or payload"})
             return
 
@@ -455,12 +518,26 @@ def main() -> None:
         if not cfg.allow_advisory_execution:
             log.error("advisory_mode_without_flag_refused")
             sys.exit(1)
-        log.warn("advisory_mode_development")
+        log.warning("advisory_mode_development")
 
-    # Required environment variables
+    # Target configuration: either EP_PROXY_TARGET_URL (single target,
+    # backward compatible) or EP_PROXY_TARGETS_FILE (multi-target JSON
+    # mapping database names to connection strings). At least one must
+    # be set.
     target_url = os.environ.get("EP_PROXY_TARGET_URL", "")
-    if not target_url:
-        print("EP_PROXY_TARGET_URL is required", file=sys.stderr)
+
+    # Load multi-target configuration (if any)
+    try:
+        proxy_targets = load_proxy_targets()
+    except ProxyConfigurationError as exc:
+        log.error("targets_load_failed", error=str(exc))
+        sys.exit(1)
+
+    if not target_url and not proxy_targets:
+        print(
+            "EP_PROXY_TARGET_URL or EP_PROXY_TARGETS_FILE is required",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     public_key_hex = os.environ.get("EP_PUBLIC_KEY", "")
@@ -492,12 +569,14 @@ def main() -> None:
     trans_engine = TransitionEngine(gov_engine, ep_service_id, policy_engine=policy_engine)
     branch_committer = BranchCommitter(gov_engine, ep_service_id)
 
-    # Proxy config
+    # Proxy config — target_connection_string may be empty in pure
+    # multi-target mode, but we keep it for backward compatibility.
     proxy_config = ProxyConfig(
         target_connection_string=target_url,
         proxy_audience=proxy_audience,
         ep_service_principal_id=ep_service_id,
         timeout_seconds=30,
+        targets=proxy_targets if proxy_targets else None,
     )
 
     # Create the proxy
@@ -543,14 +622,16 @@ def main() -> None:
         server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
         log.info("tls_enabled", cert=tls_cert)
     else:
-        log.warn("tls_disabled", hint="Set EP_PROXY_TLS_CERT and EP_PROXY_TLS_KEY to enable")
+        log.warning("tls_disabled", hint="Set EP_PROXY_TLS_CERT and EP_PROXY_TLS_KEY to enable")
 
     target_display = target_url.split("@")[1] if "@" in target_url else target_url
     gov_display = cfg.db_url.split("@")[1] if "@" in cfg.db_url else cfg.db_url
 
     log.info("proxy_started", port=proxy_port, audience=proxy_audience,
              target=target_display, governance_db=gov_display,
-             rate_limit=f"{rate_max}/{rate_window}s", tls=use_tls)
+             rate_limit=f"{rate_max}/{rate_window}s", tls=use_tls,
+             multi_target=bool(proxy_targets),
+             target_count=len(proxy_targets) if proxy_targets else 1)
 
     try:
         server.serve_forever()

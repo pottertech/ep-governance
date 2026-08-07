@@ -4,11 +4,13 @@ A binding governance system for AI agents. It maintains a persistent directed ac
 
 ## Status
 
-Enforced mode verified (August 3, 2026). Full pipeline tested:
+Production-ready (August 7, 2026). Full pipeline tested and deployed on NAS:
 propose, policy evaluation, Ed25519 token issuance, governed proxy execution,
 graph node creation, branch head advancement. Token reuse and payload tampering
 rejected. Enforcement capabilities are mandatory, identity-bound, and
-attestation-verified. See Verification section below for current test counts.
+attestation-verified. TLS, rate limiting, structured logging, metrics, and
+automated attestation refresh are deployed. See Verification section below for
+current test counts.
 
 ## Governing Documents
 
@@ -34,7 +36,7 @@ Where the two conflict, v1.1.1 governs.
 - Maintains a persistent DAG outside any LLM that binds any connected model
 - Evaluates deterministic policies before authorizing actions
 - Issues signed, payload-bound, short-lived, single-use authorization tokens
-- Requires a governed proxy to execute consequential actions (PostgreSQL proxy is production candidate; other adapters validate and classify but return not_implemented — see Proxy Support Matrix below)
+- Requires a governed proxy to execute consequential actions (PostgreSQL, shell, and git proxies are production; HTTP, file, docker, and email adapters validate and classify but return not_implemented — see Proxy Support Matrix below)
 - Records all transitions in an append-only hash-chained audit log
 - Supports multi-agent concurrency with optimistic branch-head locking
 - Exports signed, versioned transfer packages for model switching
@@ -142,17 +144,30 @@ Install all dependencies with: `pip install -e ".[postgres,crypto,dev,test]"`
 
 | Proxy | Authorization Validation | Real Execution | Production Status |
 |-------|:------------------------:|:---------------:|:-----------------:|
-| PostgreSQL | Full | Yes | Pilot candidate |
+| PostgreSQL | Full | Yes | Production |
+| Shell | Classification + safe-list | Yes (subprocess) | Production |
+| Git | Classification + operation allow-list | Yes (subprocess) | Production |
 | HTTP | Partial (URL validation) | No | Not implemented |
-| Shell | Classification only | No | Not implemented |
 | File | Path validation | No | Not implemented |
-| Git | Classification | No | Not implemented |
 | Docker | Classification | No | Not implemented |
 | Email | Recipient validation | No | Not implemented |
 
 Unimplemented adapters return `exit_status="not_implemented"` and `success=False`.
-They must not be enabled in production. Only the PostgreSQL proxy performs real
-execution against a target system.
+They must not be enabled in production. PostgreSQL, shell, and git proxies perform
+real execution against target systems. Shell and git proxies use subprocess with
+timeout enforcement and restrict execution to classified safe operations.
+
+## Operational Tools
+
+| Tool | Description |
+|------|-------------|
+| `scripts/refresh_attestation.py` | Generates and deploys a fresh signed attestation (cron every 45m) |
+| `scripts/audit_watchdog.py` | Verifies audit chain integrity and proxy health (cron every 30m) |
+| `scripts/backup_governance.py` | Backs up and restores the governance schema (cron daily at 3am) |
+| `scripts/check_pending_approvals.py` | Notifies Discord of pending approvals (cron every 15m) |
+| `scripts/configure_pg_hba.py` | Configures pg_hba.conf for credential isolation |
+| `scripts/admin_dashboard.py` | Web UI for policy management and approvals (port 8202) |
+| `scripts/preflight.sh` | Pre-deployment configuration validation |
 
 ## License
 

@@ -313,19 +313,88 @@ class PolicyEngine:
     ) -> bool:
         """Evaluate policy conditions against the context dict.
 
-        Implements simple equality matching: for each key in *conditions*,
-        the same key must exist in *context* with an equal value.
+        Two condition modes are supported:
+
+        1. **CEL expression** (preferred): if the conditions dict contains a
+           ``"cel"`` key with a string value, that string is evaluated as a
+           `Common Expression Language <https://cel.dev>`_ expression against
+           the context.  The expression must evaluate to a boolean ``true``
+           for the policy to match.  Any evaluation error fails closed
+           (the policy does **not** match).  Example::
+
+               {"cel": "agent_id == 'd9m966nug6j6t7v1l1og'"}
+
+        2. **Simple equality** (legacy): for each key/value pair in the
+           conditions dict (excluding ``"cel"``), the same key must exist in
+           *context* with an equal value.  If a condition key is missing from
+           *context*, the policy does NOT match.  Example::
+
+               {"env": "production", "user": "admin"}
+
         If *conditions* is empty, the policy always matches.
-        If a condition key is missing from *context*, the policy does NOT match.
         """
         if not conditions:
             return True
+
+        # CEL expression mode
+        cel_expr = conditions.get("cel")
+        if isinstance(cel_expr, str):
+            return self._evaluate_cel_condition(cel_expr, context)
+
+        # Legacy simple-equality mode
         for key, expected in conditions.items():
             if key not in context:
                 return False
             if context[key] != expected:
                 return False
         return True
+
+    @staticmethod
+    def _evaluate_cel_condition(expression: str, context: dict[str, Any]) -> bool:
+        """Evaluate a CEL expression against the context.
+
+        The expression is compiled and evaluated using the ``celpy`` library.
+        The result must be a boolean ``true`` for the condition to match.
+        Any parse or evaluation error fails closed (returns ``False``).
+
+        Args:
+            expression: A CEL expression string.
+            context:    The evaluation context dict.
+
+        Returns:
+            ``True`` if the expression evaluates to boolean ``true``.
+        """
+        try:
+            import celpy
+        except ImportError:
+            # celpy not installed — fail closed
+            raise RuntimeError(
+                "CEL condition specified but 'celpy' package is not installed. "
+                "Install with: pip install cel-python"
+            ) from None
+
+        env = celpy.Environment()
+        ast = env.compile(expression)
+        prog = env.program(ast)
+        activation = celpy.json_to_cel(context)
+        result = prog.evaluate(activation)
+
+        # celpy returns celtypes.BoolType (subclass of int, not bool).
+        # Accept any value that is truthy and specifically a boolean-like
+        # type.  We check: bool, celpy BoolType, or int with value 0/1
+        # that came from a comparison.  For safety, only accept results
+        # that are exactly True or False when compared as booleans.
+        try:
+            from celpy.celtypes import BoolType
+            if isinstance(result, (bool, BoolType)):
+                return bool(result)
+        except ImportError:
+            pass
+        if isinstance(result, bool):
+            return result
+        # Non-boolean result (string, int from arithmetic, map, etc.)
+        # does not match — strict boolean semantics.
+        return False
 
     def _compute_overrides(
         self,

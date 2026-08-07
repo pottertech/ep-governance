@@ -498,6 +498,303 @@ class TestConditionMatching:
 
 
 # --------------------------------------------------------------------------- #
+# CEL condition matching
+# --------------------------------------------------------------------------- #
+
+
+class TestCELConditionMatching:
+    """Tests for CEL-based condition evaluation.
+
+    When a policy's conditions dict contains a ``"cel"`` key with a string
+    value, that string is evaluated as a CEL (Common Expression Language)
+    expression against the context.  The expression must evaluate to
+    boolean ``true`` for the policy to match.
+    """
+
+    def test_cel_basic_equality_match(self):
+        """CEL expression with matching context value -> policy matches."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": "agent_id == 'd9m966nug6j6t7v1l1og'"},
+        )
+        engine = PolicyEngine([p])
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"agent_id": "d9m966nug6j6t7v1l1og"},
+        )
+        assert result.effect == "deny"
+        assert len(result.matched_policies) == 1
+
+    def test_cel_basic_equality_no_match(self):
+        """CEL expression with non-matching context value -> no match."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": "agent_id == 'd9m966nug6j6t7v1l1og'"},
+        )
+        engine = PolicyEngine([p])
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"agent_id": "other_agent_id00"},
+        )
+        assert len(result.matched_policies) == 0
+
+    def test_cel_string_contains(self):
+        """CEL string contains() function."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": "tool.contains('select')"},
+        )
+        engine = PolicyEngine([p])
+        # Matching
+        result = engine.evaluate(
+            "postgres.execute.select", RESOURCES,
+            context={"tool": "postgres.execute.select"},
+        )
+        assert result.effect == "deny"
+        # Non-matching
+        result = engine.evaluate(
+            "postgres.execute.insert", RESOURCES,
+            context={"tool": "postgres.execute.insert"},
+        )
+        assert len(result.matched_policies) == 0
+
+    def test_cel_starts_with(self):
+        """CEL startsWith() function."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": "agent_id.startsWith('d9')"},
+        )
+        engine = PolicyEngine([p])
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"agent_id": "d9m966nug6j6t7v1l1og"},
+        )
+        assert result.effect == "deny"
+
+    def test_cel_has_function(self):
+        """CEL has() macro for checking key presence."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": "has(branch_id)"},
+        )
+        engine = PolicyEngine([p])
+        # Key present -> match
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"branch_id": "0123456789abcdefghij"},
+        )
+        assert result.effect == "deny"
+        # Key absent -> no match (fail closed, not error)
+        result = engine.evaluate(ACTION, RESOURCES, context={})
+        assert len(result.matched_policies) == 0
+
+    def test_cel_logical_and(self):
+        """CEL logical && operator."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": "agent_id == 'd9m966nug6j6t7v1l1og' && tool.contains('select')"},
+        )
+        engine = PolicyEngine([p])
+        # Both true
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={
+                "agent_id": "d9m966nug6j6t7v1l1og",
+                "tool": "postgres.execute.select",
+            },
+        )
+        assert result.effect == "deny"
+        # One false
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={
+                "agent_id": "d9m966nug6j6t7v1l1og",
+                "tool": "postgres.execute.insert",
+            },
+        )
+        assert len(result.matched_policies) == 0
+
+    def test_cel_logical_or(self):
+        """CEL logical || operator."""
+        p = _make_policy(
+            effect=PolicyEffect.allow,
+            conditions={"cel": "agent_id == 'aaa' || agent_id == 'bbb'"},
+        )
+        engine = PolicyEngine([p])
+        # First matches
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"agent_id": "aaa"},
+        )
+        assert result.effect == "allow"
+        # Second matches
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"agent_id": "bbb"},
+        )
+        assert result.effect == "allow"
+        # Neither matches
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"agent_id": "ccc"},
+        )
+        assert len(result.matched_policies) == 0
+
+    def test_cel_size_function_on_map(self):
+        """CEL size() on a map (arguments dict)."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": "arguments.size() > 0"},
+        )
+        engine = PolicyEngine([p])
+        # Non-empty arguments -> match
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"arguments": {"key": "val"}},
+        )
+        assert result.effect == "deny"
+        # Empty arguments -> no match
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"arguments": {}},
+        )
+        assert len(result.matched_policies) == 0
+
+    def test_cel_matches_regex(self):
+        """CEL matches() for regex matching."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": "tool.matches('.*\\\\.select')"},
+        )
+        engine = PolicyEngine([p])
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"tool": "postgres.execute.select"},
+        )
+        assert result.effect == "deny"
+
+    def test_cel_false_expression_no_match(self):
+        """CEL expression that evaluates to false -> no match."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": "1 + 1 == 3"},
+        )
+        engine = PolicyEngine([p])
+        result = engine.evaluate(ACTION, RESOURCES, context={})
+        assert len(result.matched_policies) == 0
+
+    def test_cel_true_expression_matches(self):
+        """CEL expression that evaluates to true -> match."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": "1 + 1 == 2"},
+        )
+        engine = PolicyEngine([p])
+        result = engine.evaluate(ACTION, RESOURCES, context={})
+        assert result.effect == "deny"
+
+    def test_cel_invalid_syntax_fails_closed(self):
+        """Invalid CEL syntax -> fail closed (no match, not crash)."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": "agent_id ==="},  # Syntax error
+        )
+        engine = PolicyEngine([p])
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"agent_id": "test"},
+        )
+        # The engine wraps _match_policies in try/except, so a parse error
+        # in CEL evaluation propagates up and the engine fails closed to
+        # require_approval.
+        assert result.effect == "require_approval"
+        assert len(result.matched_policies) == 0
+        assert any("Evaluation error" in w for w in result.warnings)
+
+    def test_cel_non_boolean_result_no_match(self):
+        """CEL expression that returns non-boolean -> no match (strict bool)."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": "agent_id"},  # Returns string, not bool
+        )
+        engine = PolicyEngine([p])
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"agent_id": "test"},
+        )
+        assert len(result.matched_policies) == 0
+
+    def test_cel_with_transition_context_fields(self):
+        """CEL expression using the full transition context: agent_id, tool, arguments, branch_id."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": "agent_id == 'd9m966nug6j6t7v1l1og' && tool.contains('select') && has(branch_id)"},
+        )
+        engine = PolicyEngine([p])
+        result = engine.evaluate(
+            "postgres.execute.select", RESOURCES,
+            context={
+                "agent_id": "d9m966nug6j6t7v1l1og",
+                "tool": "postgres.execute.select",
+                "arguments": {"query": "SELECT 1"},
+                "branch_id": "0123456789abcdefghij",
+            },
+        )
+        assert result.effect == "deny"
+
+    def test_cel_preserves_empty_conditions_pass(self):
+        """Empty conditions {} still passes (backward compatibility)."""
+        p = _make_policy(effect=PolicyEffect.deny, conditions={})
+        engine = PolicyEngine([p])
+        result = engine.evaluate(ACTION, RESOURCES, context={})
+        assert result.effect == "deny"
+
+    def test_cel_and_legacy_conditions_coexist(self):
+        """Legacy key-value conditions (without 'cel' key) still work."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"env": "production", "user": "admin"},
+        )
+        engine = PolicyEngine([p])
+        # Both match
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"env": "production", "user": "admin"},
+        )
+        assert result.effect == "deny"
+        # Mismatch
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"env": "staging", "user": "admin"},
+        )
+        assert len(result.matched_policies) == 0
+
+    def test_cel_empty_string_expression_fails_closed(self):
+        """Empty string CEL expression -> parse error -> fail closed."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": ""},
+        )
+        engine = PolicyEngine([p])
+        result = engine.evaluate(ACTION, RESOURCES, context={})
+        assert result.effect == "require_approval"
+
+    def test_cel_cel_key_with_non_string_value_uses_legacy(self):
+        """If 'cel' key has a non-string value, falls through to legacy mode."""
+        p = _make_policy(
+            effect=PolicyEffect.deny,
+            conditions={"cel": True, "env": "production"},
+        )
+        engine = PolicyEngine([p])
+        # Should use legacy equality: cel=True must match context, env must match
+        result = engine.evaluate(
+            ACTION, RESOURCES,
+            context={"cel": True, "env": "production"},
+        )
+        assert result.effect == "deny"
+
+
+# --------------------------------------------------------------------------- #
 # No matching policies
 # --------------------------------------------------------------------------- #
 

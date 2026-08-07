@@ -92,6 +92,13 @@ The agent has neither.
 | `EP_PROXY_PORT` | No | `8201` | No | Proxy listening port. |
 | `EP_PUBLIC_KEY` | Yes | None | No | Governance-token verification public key (Ed25519). |
 | `EP_EP_SERVICE_ID` | Yes | None | No | EP service principal identity (XID). |
+| `EP_PROXY_TLS_CERT` | No | Empty | No | Path to TLS certificate file. Enables HTTPS when set with EP_PROXY_TLS_KEY. |
+| `EP_PROXY_TLS_KEY` | No | Empty | Yes | Path to TLS private key file. Enables HTTPS when set with EP_PROXY_TLS_CERT. |
+| `EP_PROXY_RATE_LIMIT` | No | `30` | No | Max requests per window per client IP on /execute. |
+| `EP_PROXY_RATE_WINDOW` | No | `60` | No | Rate limit window in seconds. |
+| `EP_LOG_LEVEL` | No | `INFO` | No | Log level (DEBUG, INFO, WARNING, ERROR). |
+| `EP_LOG_FILE` | No | Empty | No | Path to rotating log file. If empty, logs go to stderr. |
+| `EP_SIGNING_KEY_PASSPHRASE` | No | Empty | Yes | Passphrase for encrypted signing key files (.enc). |
 
 ### Attestation file mounting (Docker)
 

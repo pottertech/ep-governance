@@ -42,9 +42,17 @@ FORBIDDEN_OPERATIONS = frozenset({"truncate", "grant", "revoke", "vacuum"})
 class PostgresProxy(GovernedProxy):
     """Governed proxy for PostgreSQL SQL execution.
 
-    The proxy holds the target database connection string. The agent never
-    receives it. The agent sends a signed token + payload to the proxy;
-    the proxy verifies, classifies, and executes.
+    The proxy holds the target database connection string(s). The agent
+    never receives them. The agent sends a signed token + payload to the
+    proxy; the proxy verifies, classifies, and executes.
+
+    In single-target mode (``config.targets`` is empty/None) all
+    executions go to ``config.target_connection_string``.
+
+    In multi-target mode (``config.targets`` is set) the proxy reads the
+    ``database`` field from the payload and routes execution to the
+    matching target connection string. If no matching target exists the
+    execution fails.
     """
 
     def __init__(
@@ -60,10 +68,12 @@ class PostgresProxy(GovernedProxy):
             engine, auth_engine, config, transition_engine, branch_committer, policy_engine
         )
         self._target_engine: sa.Engine | None = None
+        # Cache of engines for multi-target mode, keyed by database name.
+        self._target_engines: dict[str, sa.Engine] = {}
 
     @property
     def target_engine(self) -> sa.Engine:
-        """Lazily create the target database engine."""
+        """Lazily create the target database engine (single-target mode)."""
         if self._target_engine is None:
             # Use our create_engine to ensure psycopg3 driver and
             # proper URL normalization.
@@ -72,6 +82,46 @@ class PostgresProxy(GovernedProxy):
                 self.config.target_connection_string,
             )
         return self._target_engine
+
+    def _resolve_target_engine(self, payload: dict[str, Any]) -> sa.Engine | None:
+        """Resolve the correct target engine for this payload.
+
+        In multi-target mode, selects the engine based on the
+        ``database`` field in the payload. Returns ``None`` if the
+        database name is not configured.
+
+        In single-target mode, always returns the default
+        ``target_engine``.
+
+        Args:
+            payload: The execution payload (may contain a ``database``
+                field).
+
+        Returns:
+            The SQLAlchemy Engine for the target, or ``None`` if the
+            requested database is not configured.
+        """
+        targets = self.config.targets
+        if not targets:
+            return self.target_engine
+
+        database = payload.get("database")
+        if not database:
+            # No database specified in multi-target mode — fall back to
+            # the default target if one is configured.
+            if self.config.target_connection_string:
+                return self.target_engine
+            return None
+
+        if database not in targets:
+            return None
+
+        if database not in self._target_engines:
+            from ..db.postgres import create_engine as ep_create_engine
+            self._target_engines[database] = ep_create_engine(
+                targets[database],
+            )
+        return self._target_engines[database]
 
     def _validate_adapter_payload(
         self,
@@ -131,8 +181,9 @@ class PostgresProxy(GovernedProxy):
         1. Extract and classify the SQL
         2. Check the classified operation is allowed
         3. Verify the classified action type matches what was authorized (tool field)
-        4. Execute the SQL against the target database
-        5. Capture the result
+        4. Resolve the target engine (single or multi-target routing)
+        5. Execute the SQL against the target database
+        6. Capture the result
         """
         # Extract SQL from payload
         sql = payload.get("sql") or payload.get("query") or payload.get("statement")
@@ -204,14 +255,32 @@ class PostgresProxy(GovernedProxy):
                     result_summary=f"DDL operation '{operation}' was not authorized (token tool: {token.tool})",
                 )
 
+        # Resolve the target engine (single-target or multi-target routing)
+        resolved_engine = self._resolve_target_engine(payload)
+        if resolved_engine is None:
+            database = payload.get("database", "")
+            if database:
+                return ExecutionResult(
+                    success=False,
+                    exit_status="failure",
+                    result_summary=(
+                        f"Database '{database}' is not configured as a proxy target"
+                    ),
+                )
+            return ExecutionResult(
+                success=False,
+                exit_status="failure",
+                result_summary="No target database available for execution",
+            )
+
         # Execute the SQL
         try:
-            with self.target_engine.connect() as target_conn:
+            with resolved_engine.connect() as target_conn:
                 # High fix 7: enforce statement and lock timeouts at the
                 # database level. SET LOCAL applies only to the current
                 # transaction and is automatically reset on COMMIT/ROLLBACK.
                 # Only apply to PostgreSQL — SQLite does not support these.
-                if self.target_engine.dialect.name != "sqlite":
+                if resolved_engine.dialect.name != "sqlite":
                     target_conn.execute(
                         sa.text(
                             f"SET LOCAL statement_timeout = '{self.config.timeout_seconds * 1000}ms'"
@@ -253,7 +322,10 @@ class PostgresProxy(GovernedProxy):
             )
 
     def close(self) -> None:
-        """Close the target database engine."""
+        """Close all target database engines."""
         if self._target_engine is not None:
             self._target_engine.dispose()
             self._target_engine = None
+        for engine in self._target_engines.values():
+            engine.dispose()
+        self._target_engines = {}

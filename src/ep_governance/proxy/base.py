@@ -54,13 +54,25 @@ PROXY_MAX_OUTPUT_BYTES = 1024 * 1024  # 1 MB
 
 @dataclass
 class ProxyConfig:
-    """Configuration for a governed proxy."""
+    """Configuration for a governed proxy.
+
+    Supports either a single target (backward compatible) or multiple
+    named targets. When ``target_connection_string`` is set the proxy
+    operates in single-target mode — all executions go to that database.
+    When ``targets`` is set the proxy routes each execution to the target
+    whose name matches the ``database`` field in the payload.
+    """
 
     target_connection_string: str
     proxy_audience: str
     ep_service_principal_id: str
     timeout_seconds: int = PROXY_TIMEOUT_SECONDS
     max_output_bytes: int = PROXY_MAX_OUTPUT_BYTES
+    # Multi-target routing: maps database name -> connection string.
+    # When non-empty, the proxy selects the target based on the
+    # ``database`` field in the payload. When empty, the proxy falls
+    # back to ``target_connection_string`` (single-target mode).
+    targets: dict[str, str] | None = None
 
 
 @dataclass
