@@ -69,7 +69,9 @@ def get_logger(
                   to EP_LOG_FILE env var. If not set, logs go to stderr.
 
     Returns:
-        A configured logging.Logger instance.
+        A configured logging.Logger instance that accepts extra keyword
+        arguments directly: log.info("msg", key=value) passes key=value
+        as an extra field in the JSON output.
     """
     logger = logging.getLogger(f"ep_governance.{name}")
 
@@ -103,4 +105,30 @@ def get_logger(
     # Don't propagate to root logger (avoid duplicate messages)
     logger.propagate = False
 
+    # Wrap log methods to accept extra kwargs directly
+    _wrap_logger(logger)
+
     return logger
+
+
+def _wrap_logger(logger: logging.Logger) -> None:
+    """Wrap log methods so extra fields can be passed as kwargs.
+
+    Transforms: log.info("msg", key=value)
+    Into:       log.info("msg", extra={"key": value})
+    """
+    for level_name in ("debug", "info", "warning", "warn", "error", "critical", "exception"):
+        original = getattr(logger, level_name, None)
+        if original is None:
+            continue
+
+        def make_wrapper(orig):
+            def wrapper(msg, *args, **kwargs):
+                extra = kwargs.pop("extra", {})
+                extra.update(kwargs)
+                if args:
+                    return orig(msg, *args, extra=extra)
+                return orig(msg, extra=extra)
+            return wrapper
+
+        setattr(logger, level_name, make_wrapper(original))
