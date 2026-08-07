@@ -1,0 +1,4 @@
+# EP-Governance agent configuration for Mary Wise
+# This file binds the MCP server to the Mary Wise agent principal.
+principal_id = "d9ll46fug6j0mqovnr0g"
+name = "Mary Wise"

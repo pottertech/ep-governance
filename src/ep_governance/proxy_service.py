@@ -45,11 +45,14 @@ from ep_governance.config import load_config, OperatingMode
 from ep_governance.db.postgres import create_engine
 from ep_governance.db.repositories import PolicyRepository, BranchRepository, TransitionRepository
 from ep_governance.deployment import EnforcementCapability, EnforcementUnavailableError
+from ep_governance.logging import get_logger
 from ep_governance.policies import Policy
 from ep_governance.policy_engine import PolicyEngine
 from ep_governance.proxy.postgres_proxy import PostgresProxy
 from ep_governance.proxy.base import ProxyConfig
 from ep_governance.transitions import TransitionEngine
+
+log = get_logger("proxy")
 
 
 __all__ = ["ProxyServer", "ProxyHandler", "ProxyConfigurationError"]
@@ -84,6 +87,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 "audience": self.server.proxy_audience,
                 "target": "postgresql",
             })
+        elif self.path == "/metrics":
+            metrics = getattr(self.server, "metrics", None)
+            if metrics:
+                body = metrics.to_prometheus().encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/plain; version=0.0.4")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self._send_json(503, {"error": "Metrics not available"})
         else:
             self._send_json(404, {"error": "Not found"})
 
@@ -96,6 +110,11 @@ class ProxyHandler(BaseHTTPRequestHandler):
         client_ip = self.client_address[0] if self.client_address else "unknown"
         rate_limiter = getattr(self.server, "rate_limiter", None)
         if rate_limiter and not rate_limiter.check(client_ip):
+            log.warn("rate_limited", client_ip=client_ip,
+                     max=rate_limiter.max_requests, window=rate_limiter.window_seconds)
+            metrics = getattr(self.server, "metrics", None)
+            if metrics:
+                metrics.inc("rate_limited_total")
             self._send_json(429, {
                 "error": "Rate limit exceeded",
                 "message": f"Too many requests from {client_ip}. "
@@ -109,6 +128,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(content_length)
             request = json.loads(body)
         except Exception as exc:
+            log.error("invalid_request", client_ip=client_ip, error=str(exc))
+            metrics = getattr(self.server, "metrics", None)
+            if metrics:
+                metrics.inc("invalid_requests_total")
             self._send_json(400, {"error": f"Invalid request: {exc}"})
             return
 
@@ -116,6 +139,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
         payload = request.get("payload")
 
         if not signed_token or not payload:
+            log.warn("missing_fields", client_ip=client_ip)
             self._send_json(400, {"error": "Missing signed_token or payload"})
             return
 
@@ -126,6 +150,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 public_key=self.server.public_key,
                 enforcement_capability=self.server.enforcement_capability,
             )
+            log.info("execute", client_ip=client_ip, success=result.success,
+                     exit_status=result.exit_status, rows=result.rows_affected)
+            metrics = getattr(self.server, "metrics", None)
+            if metrics:
+                metrics.inc("executions_total")
+                if result.success:
+                    metrics.inc("executions_succeeded")
+                else:
+                    metrics.inc("executions_failed")
             self._send_json(200, {
                 "success": result.success,
                 "exit_status": result.exit_status,
@@ -141,8 +174,9 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._send_json(500, {"error": f"Execution failed: {exc}"})
 
     def log_message(self, format: str, *args: Any) -> None:
-        # Log to stderr for Docker logs
-        sys.stderr.write(f"[proxy] {self.address_string()} - {format % args}\n")
+        # Structured log for HTTP requests
+        log.info("http_request", method=self.command, path=self.path,
+                 client=self.address_string())
 
 
 class RateLimiter:
@@ -171,6 +205,59 @@ class RateLimiter:
             return True
 
 
+class MetricsCollector:
+    """In-memory metrics collector for the proxy.
+
+    Tracks request counts, execution results, and rate-limit hits.
+    Exposes metrics in Prometheus text format via /metrics.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._data: dict[str, Any] = {
+            "requests_total": 0,
+            "executions_total": 0,
+            "executions_succeeded": 0,
+            "executions_failed": 0,
+            "rate_limited_total": 0,
+            "invalid_requests_total": 0,
+            "started_at": time.time(),
+        }
+
+    def inc(self, key: str, amount: int = 1) -> None:
+        with self._lock:
+            self._data[key] = self._data.get(key, 0) + amount
+
+    def to_prometheus(self) -> str:
+        with self._lock:
+            d = dict(self._data)
+        uptime = time.time() - d["started_at"]
+        lines = [
+            "# HELP ep_proxy_requests_total Total HTTP requests to /execute",
+            "# TYPE ep_proxy_requests_total counter",
+            f"ep_proxy_requests_total {d['requests_total']}",
+            "# HELP ep_proxy_executions_total Total proxy executions",
+            "# TYPE ep_proxy_executions_total counter",
+            f"ep_proxy_executions_total {d['executions_total']}",
+            "# HELP ep_proxy_executions_succeeded Total successful executions",
+            "# TYPE ep_proxy_executions_succeeded counter",
+            f"ep_proxy_executions_succeeded {d['executions_succeeded']}",
+            "# HELP ep_proxy_executions_failed Total failed executions",
+            "# TYPE ep_proxy_executions_failed counter",
+            f"ep_proxy_executions_failed {d['executions_failed']}",
+            "# HELP ep_proxy_rate_limited_total Total rate-limited requests",
+            "# TYPE ep_proxy_rate_limited_total counter",
+            f"ep_proxy_rate_limited_total {d['rate_limited_total']}",
+            "# HELP ep_proxy_invalid_requests_total Total invalid requests",
+            "# TYPE ep_proxy_invalid_requests_total counter",
+            f"ep_proxy_invalid_requests_total {d['invalid_requests_total']}",
+            "# HELP ep_proxy_uptime_seconds Proxy uptime in seconds",
+            "# TYPE ep_proxy_uptime_seconds gauge",
+            f"ep_proxy_uptime_seconds {uptime:.0f}",
+        ]
+        return "\n".join(lines) + "\n"
+
+
 class ProxyServer(HTTPServer):
     """HTTP server with proxy context."""
 
@@ -179,6 +266,7 @@ class ProxyServer(HTTPServer):
     public_key: Any  # VerifyKey
     enforcement_capability: EnforcementCapability
     rate_limiter: RateLimiter
+    metrics: MetricsCollector
 
 
 def _load_public_key(hex_key: str) -> Any:
@@ -351,11 +439,7 @@ def load_proxy_capability(proxy_audience: str) -> EnforcementCapability:
             f"{getattr(capability, 'proxy_audience', None)!r}."
         )
 
-    print(
-        "Proxy enforcement capability loaded and verified from signed "
-        "attestation.",
-        file=sys.stderr,
-    )
+    log.info("attestation_loaded_and_verified")
     return capability
 
 
@@ -366,24 +450,12 @@ def main() -> None:
     # Advisory mode is only available in development (EP_DEV=true).
     if cfg.mode == OperatingMode.ADVISORY:
         if not cfg.dev:
-            print(
-                "FATAL: Proxy cannot start in advisory mode in production. "
-                "Set EP_MODE=enforced.",
-                file=sys.stderr,
-            )
+            log.error("advisory_mode_in_production_refused")
             sys.exit(1)
         if not cfg.allow_advisory_execution:
-            print(
-                "FATAL: Proxy cannot start in advisory mode without "
-                "EP_ALLOW_ADVISORY_EXECUTION=true.",
-                file=sys.stderr,
-            )
+            log.error("advisory_mode_without_flag_refused")
             sys.exit(1)
-        print(
-            "WARNING: Proxy starting in advisory mode (development). "
-            "Production deployments must use EP_MODE=enforced.",
-            file=sys.stderr,
-        )
+        log.warn("advisory_mode_development")
 
     # Required environment variables
     target_url = os.environ.get("EP_PROXY_TARGET_URL", "")
@@ -398,7 +470,7 @@ def main() -> None:
 
     ep_service_id = os.environ.get("EP_EP_SERVICE_ID", "")
     if not ep_service_id:
-        print("EP_EP_SERVICE_ID is required", file=sys.stderr)
+        log.error("missing_env_var", var="EP_EP_SERVICE_ID")
         sys.exit(1)
 
     proxy_audience = os.environ.get("EP_PROXY_AUDIENCE", "postgres-proxy")
@@ -439,14 +511,10 @@ def main() -> None:
     )
 
     # Load the enforcement capability from a signed proxy attestation.
-    # The proxy must NOT self-mint a capability — that would bypass the
-    # deployment controller's signature. Instead, the controller signs an
-    # attestation document and the proxy loads/verifies it at startup.
-    # See load_proxy_capability() for the encapsulated logic.
     try:
         proxy_capability = load_proxy_capability(proxy_audience)
     except ProxyConfigurationError as exc:
-        print(f"FATAL: {exc}", file=sys.stderr)
+        log.error("attestation_load_failed", error=str(exc))
         sys.exit(1)
 
     # Start the HTTP server (with optional TLS)
@@ -461,6 +529,9 @@ def main() -> None:
     rate_window = int(os.environ.get("EP_PROXY_RATE_WINDOW", "60"))
     server.rate_limiter = RateLimiter(max_requests=rate_max, window_seconds=rate_window)
 
+    # Metrics collector
+    server.metrics = MetricsCollector()
+
     # TLS configuration (if cert and key files are provided)
     tls_cert = os.environ.get("EP_PROXY_TLS_CERT", "")
     tls_key = os.environ.get("EP_PROXY_TLS_KEY", "")
@@ -470,20 +541,21 @@ def main() -> None:
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_context.load_cert_chain(tls_cert, tls_key)
         server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
-        print(f"  TLS: enabled (cert: {tls_cert})", file=sys.stderr)
+        log.info("tls_enabled", cert=tls_cert)
     else:
-        print(f"  TLS: disabled (set EP_PROXY_TLS_CERT and EP_PROXY_TLS_KEY to enable)", file=sys.stderr)
+        log.warn("tls_disabled", hint="Set EP_PROXY_TLS_CERT and EP_PROXY_TLS_KEY to enable")
 
-    print(f"EP-Governance proxy listening on port {proxy_port}", file=sys.stderr)
-    print(f"  Audience: {proxy_audience}", file=sys.stderr)
-    print(f"  Target: {target_url.split('@')[1] if '@' in target_url else target_url}", file=sys.stderr)
-    print(f"  Governance DB: {cfg.db_url.split('@')[1] if '@' in cfg.db_url else cfg.db_url}", file=sys.stderr)
-    print(f"  Rate limit: {rate_max} requests per {rate_window}s per IP", file=sys.stderr)
+    target_display = target_url.split("@")[1] if "@" in target_url else target_url
+    gov_display = cfg.db_url.split("@")[1] if "@" in cfg.db_url else cfg.db_url
+
+    log.info("proxy_started", port=proxy_port, audience=proxy_audience,
+             target=target_display, governance_db=gov_display,
+             rate_limit=f"{rate_max}/{rate_window}s", tls=use_tls)
 
     try:
         server.serve_forever()
     except KeyboardInterrupt:
-        print("Proxy shutting down", file=sys.stderr)
+        log.info("proxy_shutdown")
     finally:
         proxy.close()
 

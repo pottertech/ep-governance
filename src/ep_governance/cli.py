@@ -183,6 +183,121 @@ def register(
         raise typer.Exit(1)
 
 
+@app.command("register-agent")
+def register_agent(
+    name: str = typer.Option(..., "--name", help="Agent name (e.g. 'Brodie')."),
+    actions: str = typer.Option("postgres.execute.select", "--actions",
+                                help="Comma-separated action types to allow (default: SELECT only)."),
+    json: bool = typer.Option(False, "--json", help="Output as JSON."),
+) -> None:
+    """Register a new agent principal with role binding and default policy.
+
+    Creates:
+    1. A principal of type 'agent' with the given name
+    2. The 'agent' role (if it does not already exist)
+    3. A role binding linking the agent to the 'agent' role
+    4. An agent-scoped allow policy for the specified actions
+
+    The agent keeps any existing direct DB credentials -- this is advisory
+    mode onboarding. The policy allows the agent to run queries through the
+    governed proxy for testing.
+    """
+    try:
+        conn = _get_conn()
+        ep_id = _ensure_ep_service_principal(conn)
+
+        # 1. Create principal
+        repo = PrincipalRepository(conn)
+        agent_id = str(XID.new())
+        principal = repo.insert_principal(
+            principal_id=agent_id,
+            name=name,
+            type="agent",
+            machine=None,
+            description=f"Registered via CLI register-agent",
+        )
+
+        # 2. Find or create the 'agent' role
+        import sqlalchemy as _sa
+        result = conn.execute(_sa.text(
+            "SELECT id FROM ep_roles WHERE name = 'agent' LIMIT 1"
+        ))
+        row = result.fetchone()
+        if row:
+            role_id = row[0]
+        else:
+            role_id = str(XID.new())
+            conn.execute(_sa.text(
+                "INSERT INTO ep_roles (id, name, permissions) "
+                "VALUES (:id, 'agent', :perms) "
+                "ON CONFLICT (id) DO NOTHING"
+            ), {
+                "id": role_id,
+                "perms": _sa.text("'[\"ep_check\",\"ep_execute\",\"ep_status\",\"ep_log\",\"ep_list_policies\"]'::jsonb"),
+            })
+
+        # 3. Create role binding
+        binding_id = str(XID.new())
+        conn.execute(_sa.text(
+            "INSERT INTO ep_role_bindings (id, principal_id, role_id, project_id, bound_at) "
+            "VALUES (:bid, :pid, :rid, NULL, NOW()) "
+            "ON CONFLICT (id) DO NOTHING"
+        ), {"bid": binding_id, "pid": agent_id, "rid": role_id})
+
+        # 4. Create agent-scoped policy
+        policy_id = str(XID.new())
+        import json as json_mod
+        action_list = [a.strip() for a in actions.split(",") if a.strip()]
+
+        # Use raw SQL with proper parameterization for JSONB
+        actions_json_str = json_mod.dumps(action_list)
+        conn.execute(_sa.text(
+            "INSERT INTO ep_policies ("
+            "  id, created_by, scope, agent_scope, project_id, branch_id, "
+            "  effect, actions, resources, conditions, priority, description, "
+            "  status, policy_version, established_at, approved_by, approved_at, "
+            "  activation_version, origin, trust_status"
+            ") VALUES ("
+            "  :pid, :created_by, 'agent', :agent_scope, NULL, NULL, "
+            "  'allow', CAST(:actions AS jsonb), CAST('[\"*\"]' AS jsonb), "
+            "  CAST('{}' AS jsonb), 10, :desc, "
+            "  'active', 1, NOW(), :approved_by, NOW(), "
+            "  1, 'local', 'trusted'"
+            ")"
+        ), {
+            "pid": policy_id,
+            "created_by": ep_id,
+            "agent_scope": agent_id,
+            "actions": actions_json_str,
+            "desc": f"Allow {name} to run {', '.join(action_list)} through governed proxy",
+            "approved_by": ep_id,
+        })
+
+        conn.commit()
+        conn.close()
+
+        _output({
+            "status": "registered",
+            "principal_id": agent_id,
+            "name": name,
+            "type": "agent",
+            "role": "agent",
+            "role_binding_id": binding_id,
+            "policy_id": policy_id,
+            "actions": action_list,
+            "mode": "advisory",
+            "message": (
+                f"Agent '{name}' registered with 'agent' role and "
+                f"allow policy for {', '.join(action_list)}. "
+                f"Direct DB credentials are unchanged (advisory mode)."
+            ),
+        }, json)
+
+    except EPError as exc:
+        _error(str(exc), json)
+        raise typer.Exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Project commands
 # ---------------------------------------------------------------------------
