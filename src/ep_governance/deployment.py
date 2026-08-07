@@ -559,6 +559,15 @@ class EnforcementCapability:
                 "Attestation signature verification failed"
             )
 
+        # Check attestation schema version (optional but recommended).
+        # Version 1 is the default if not specified (backward compatible).
+        attestation_version = data.get("schema_version", 1)
+        if attestation_version != 1:
+            raise EnforcementUnavailableError(
+                f"Unsupported attestation schema_version: {attestation_version}. "
+                f"This proxy supports version 1 only."
+            )
+
         # Extract required fields (including supported_action_types -- mandatory).
         required_fields = [
             "effective_mode", "binding_enforcement_active", "agent_principal_id",

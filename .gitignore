@@ -47,3 +47,5 @@ Thumbs.db
 .pytest_cache/
 .hypothesis/
 backups/
+ep_signing_prod.key.enc
+ep_signing_prod.key

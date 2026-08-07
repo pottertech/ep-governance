@@ -172,11 +172,55 @@ class ShellProxy(GovernedProxy):
                     result_summary="Command contains dangerous pattern — classified as opaque, requires approval",
                 )
 
-        # Execution adapter is not implemented — return failure so the
-        # governance graph does not record a no-op as success.
-        return ExecutionResult(
-            success=False,
-            exit_status="not_implemented",
-            result_summary="Shell execution adapter is not implemented",
-            output=None,
-        )
+        # Execute the safe command using subprocess
+        import subprocess
+        import time as _time
+
+        attempt_id = str(__import__("ep_governance.xid", fromlist=["XID"]).XID.new())
+        started = _time.time()
+
+        try:
+            proc = subprocess.run(
+                parts,
+                capture_output=True,
+                text=True,
+                timeout=self.config.timeout_seconds if hasattr(self.config, "timeout_seconds") else 30,
+            )
+            completed = _time.time()
+            success = proc.returncode == 0
+            output = proc.stdout if proc.stdout else ""
+            if proc.stderr:
+                output += f"\n[stderr]\n{proc.stderr}" if output else proc.stderr
+
+            return ExecutionResult(
+                success=success,
+                exit_status="success" if success else "failure",
+                result_summary=f"Command '{executable}' exited with code {proc.returncode}",
+                output=output,
+                rows_affected=0,
+                execution_attempt_id=attempt_id,
+                started_at=started,
+                completed_at=completed,
+            )
+        except subprocess.TimeoutExpired:
+            completed = _time.time()
+            return ExecutionResult(
+                success=False,
+                exit_status="timeout",
+                result_summary=f"Command '{executable}' timed out",
+                output=None,
+                execution_attempt_id=attempt_id,
+                started_at=started,
+                completed_at=completed,
+            )
+        except Exception as exc:
+            completed = _time.time()
+            return ExecutionResult(
+                success=False,
+                exit_status="failure",
+                result_summary=f"Command execution error: {exc}",
+                output=None,
+                execution_attempt_id=attempt_id,
+                started_at=started,
+                completed_at=completed,
+            )

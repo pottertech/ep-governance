@@ -17,6 +17,7 @@ Supported operations:
 
 from __future__ import annotations
 
+import os
 import shlex
 from typing import Any
 
@@ -239,28 +240,65 @@ class GitProxy(GovernedProxy):
                     ),
                 )
 
-        # Step 6: Return simulated result.
-        # This is a STUB — real execution requires filesystem access.
-        allowed_label = (
-            "allowed (read-only)" if is_allowed else "restricted (explicitly authorized)"
-        )
-        args_str = " ".join(args) if args else ""
-        full_command = f"git {operation} {args_str}".strip()
-        simulated_output = (
-            f"[SIMULATED] Git command: {full_command}\n"
-            f"[SIMULATED] Repository: {repo or '(default)'}\n"
-            f"[SIMULATED] Classified operation: {operation}\n"
-            f"[SIMULATED] Status: {allowed_label}\n"
-            f"[SIMULATED] Token tool: {token.tool}\n"
-            f"[SIMULATED] No actual git execution performed (stub proxy)."
-        )
+        # Step 6: Execute the git command using subprocess.
+        import subprocess
+        import time as _time
 
-        return ExecutionResult(
-            success=False,
-            exit_status="not_implemented",
-            result_summary="Git execution adapter is not implemented",
-            output=None,
-        )
+        attempt_id = str(__import__("ep_governance.xid", fromlist=["XID"]).XID.new())
+        started = _time.time()
+
+        args_str = " ".join(args) if args else ""
+        full_command = ["git", operation] + args
+
+        # Set working directory if repo is specified
+        cwd = repo if repo and os.path.isdir(repo) else None
+
+        try:
+            proc = subprocess.run(
+                full_command,
+                capture_output=True,
+                text=True,
+                timeout=self.config.timeout_seconds if hasattr(self.config, "timeout_seconds") else 30,
+                cwd=cwd,
+            )
+            completed = _time.time()
+            success = proc.returncode == 0
+            output = proc.stdout if proc.stdout else ""
+            if proc.stderr:
+                output += f"\n[stderr]\n{proc.stderr}" if output else proc.stderr
+
+            return ExecutionResult(
+                success=success,
+                exit_status="success" if success else "failure",
+                result_summary=f"git {operation} exited with code {proc.returncode}",
+                output=output,
+                rows_affected=0,
+                execution_attempt_id=attempt_id,
+                started_at=str(started),
+                completed_at=str(completed),
+            )
+        except subprocess.TimeoutExpired:
+            completed = _time.time()
+            return ExecutionResult(
+                success=False,
+                exit_status="timeout",
+                result_summary=f"git {operation} timed out",
+                output=None,
+                execution_attempt_id=attempt_id,
+                started_at=str(started),
+                completed_at=str(completed),
+            )
+        except Exception as exc:
+            completed = _time.time()
+            return ExecutionResult(
+                success=False,
+                exit_status="failure",
+                result_summary=f"Git execution error: {exc}",
+                output=None,
+                execution_attempt_id=attempt_id,
+                started_at=str(started),
+                completed_at=str(completed),
+            )
 
     # ------------------------------------------------------------------ #
     # Cleanup

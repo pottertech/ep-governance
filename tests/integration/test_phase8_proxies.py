@@ -418,9 +418,10 @@ class TestShellProxy:
             "",
         )
         result = proxy._execute_adapter({"command": "ls -la /tmp"}, token, "a1")
-        assert result.success is False
-        assert result.exit_status == "not_implemented"
-        assert "not implemented" in result.result_summary.lower()
+        # Now that the shell proxy executes safe commands, it should succeed
+        assert result.success is True
+        assert result.exit_status == "success"
+        assert "ls" in result.result_summary
 
     def test_eval_opaque_rejected(self, conn, engine, auth_engine, key_manager, ep_service_id):
         config = ProxyConfig("shell://localhost", "shell-proxy", ep_service_id)

@@ -669,14 +669,21 @@ def _ep_execute(
         }
 
     # Load the signing key from EP_SIGNING_KEY_FILE (production path).
-    # Falls back to generating a new key only in dev mode with no file configured.
+    # Supports both plain and encrypted (.enc) key files.
+    from ep_governance.key_crypto import resolve_signing_key
     key_file = os.environ.get("EP_SIGNING_KEY_FILE", "")
-    if key_file and os.path.isfile(key_file):
-        km = KeyManager()
-        km.load_private_key(key_file)
+    if key_file and (
+        os.path.isfile(key_file)
+        or (key_file.endswith(".enc") and os.path.isfile(key_file))
+    ):
+        try:
+            km = resolve_signing_key(key_file)
+        except RuntimeError:
+            # Decryption failed or no passphrase -- try as plain key
+            km = KeyManager()
+            km.load_private_key(key_file.replace(".enc", ""))
     else:
-        # Dev fallback: generate an ephemeral key (tokens won't verify
-        # against a proxy that has a different public key).
+        # Dev fallback: generate an ephemeral key
         km = KeyManager()
 
     auth_engine = AuthorizationEngine(conn.engine, km, ep_id)

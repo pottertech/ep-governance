@@ -73,19 +73,24 @@ def generate_attestation(env_proxy):
               file=sys.stderr)
         sys.exit(1)
 
-    # Load controller signing key
+    # Load controller signing key (supports encrypted .enc files)
     if not CONTROLLER_KEY or not os.path.isfile(CONTROLLER_KEY):
         print(f"ERROR: EP_SIGNING_KEY_FILE not set or file not found: {CONTROLLER_KEY}",
               file=sys.stderr)
         sys.exit(1)
 
-    km = KeyManager()
-    km.load_private_key(CONTROLLER_KEY)
+    from ep_governance.key_crypto import resolve_signing_key
+    try:
+        km = resolve_signing_key(CONTROLLER_KEY)
+    except RuntimeError as e:
+        print(f"ERROR: Cannot load signing key: {e}", file=sys.stderr)
+        sys.exit(1)
 
     issued_at = datetime.now(timezone.utc)
     expires_at = issued_at + timedelta(minutes=ATTESTATION_TTL_MINUTES)
 
     attestation_data = {
+        "schema_version": 1,
         "effective_mode": "enforced",
         "binding_enforcement_active": True,
         "agent_principal_id": "proxy",
