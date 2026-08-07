@@ -27,7 +27,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+import ssl
+import time
+import threading
 import traceback
+from collections import defaultdict, deque
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Any
 
@@ -88,6 +92,18 @@ class ProxyHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "Not found"})
             return
 
+        # Rate limiting on /execute endpoint
+        client_ip = self.client_address[0] if self.client_address else "unknown"
+        rate_limiter = getattr(self.server, "rate_limiter", None)
+        if rate_limiter and not rate_limiter.check(client_ip):
+            self._send_json(429, {
+                "error": "Rate limit exceeded",
+                "message": f"Too many requests from {client_ip}. "
+                           f"Max {rate_limiter.max_requests} per "
+                           f"{rate_limiter.window_seconds}s.",
+            })
+            return
+
         try:
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length)
@@ -129,6 +145,32 @@ class ProxyHandler(BaseHTTPRequestHandler):
         sys.stderr.write(f"[proxy] {self.address_string()} - {format % args}\n")
 
 
+class RateLimiter:
+    """Simple in-memory rate limiter using sliding window per client IP.
+
+    Limits the number of requests per time window per client. Thread-safe.
+    """
+
+    def __init__(self, max_requests: int = 30, window_seconds: int = 60) -> None:
+        self.max_requests = max_requests
+        self.window_seconds = window_seconds
+        self._requests: dict[str, deque[float]] = defaultdict(deque)
+        self._lock = threading.Lock()
+
+    def check(self, client_ip: str) -> bool:
+        """Return True if the request is allowed, False if rate-limited."""
+        now = time.monotonic()
+        with self._lock:
+            reqs = self._requests[client_ip]
+            # Evict entries outside the window
+            while reqs and reqs[0] <= now - self.window_seconds:
+                reqs.popleft()
+            if len(reqs) >= self.max_requests:
+                return False
+            reqs.append(now)
+            return True
+
+
 class ProxyServer(HTTPServer):
     """HTTP server with proxy context."""
 
@@ -136,6 +178,7 @@ class ProxyServer(HTTPServer):
     proxy_audience: str
     public_key: Any  # VerifyKey
     enforcement_capability: EnforcementCapability
+    rate_limiter: RateLimiter
 
 
 def _load_public_key(hex_key: str) -> Any:
@@ -406,17 +449,36 @@ def main() -> None:
         print(f"FATAL: {exc}", file=sys.stderr)
         sys.exit(1)
 
-    # Start the HTTP server
+    # Start the HTTP server (with optional TLS)
     server = ProxyServer(("0.0.0.0", proxy_port), ProxyHandler)
     server.proxy = proxy
     server.proxy_audience = proxy_audience
     server.public_key = public_key
     server.enforcement_capability = proxy_capability
 
+    # Rate limiter: 30 requests per minute per client IP
+    rate_max = int(os.environ.get("EP_PROXY_RATE_LIMIT", "30"))
+    rate_window = int(os.environ.get("EP_PROXY_RATE_WINDOW", "60"))
+    server.rate_limiter = RateLimiter(max_requests=rate_max, window_seconds=rate_window)
+
+    # TLS configuration (if cert and key files are provided)
+    tls_cert = os.environ.get("EP_PROXY_TLS_CERT", "")
+    tls_key = os.environ.get("EP_PROXY_TLS_KEY", "")
+    use_tls = bool(tls_cert and tls_key)
+
+    if use_tls:
+        ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_context.load_cert_chain(tls_cert, tls_key)
+        server.socket = ssl_context.wrap_socket(server.socket, server_side=True)
+        print(f"  TLS: enabled (cert: {tls_cert})", file=sys.stderr)
+    else:
+        print(f"  TLS: disabled (set EP_PROXY_TLS_CERT and EP_PROXY_TLS_KEY to enable)", file=sys.stderr)
+
     print(f"EP-Governance proxy listening on port {proxy_port}", file=sys.stderr)
     print(f"  Audience: {proxy_audience}", file=sys.stderr)
     print(f"  Target: {target_url.split('@')[1] if '@' in target_url else target_url}", file=sys.stderr)
     print(f"  Governance DB: {cfg.db_url.split('@')[1] if '@' in cfg.db_url else cfg.db_url}", file=sys.stderr)
+    print(f"  Rate limit: {rate_max} requests per {rate_window}s per IP", file=sys.stderr)
 
     try:
         server.serve_forever()

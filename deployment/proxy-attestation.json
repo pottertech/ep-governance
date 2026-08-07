@@ -1,0 +1,19 @@
+{
+  "effective_mode": "enforced",
+  "binding_enforcement_active": true,
+  "agent_principal_id": "proxy",
+  "proxy_scoped": true,
+  "issued_at": "2026-08-06T21:47:52.362734+00:00",
+  "expires_at": "2026-08-06T22:42:52.362734+00:00",
+  "proxy_principal_id": "d9qg16vug6j9on6f7j6g",
+  "proxy_audience": "postgres-proxy",
+  "deployment_id": "d9qg16vug6j9on6f7j70",
+  "target_id": "d9qg16vug6j9on6f7j7g",
+  "supported_action_types": [
+    "select",
+    "insert",
+    "update",
+    "delete"
+  ],
+  "signature": "277a084c4a18d870f111cccfffe6d1d84e51da6848b95447bcde6bb6d50d8a73902d81a1b71cd28a6466599d9935d418b2c4d5f28ac02d98fc4eff2b880b7f0f"
+}

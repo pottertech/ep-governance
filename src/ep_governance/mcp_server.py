@@ -668,9 +668,16 @@ def _ep_execute(
             "error": "Could not resolve project_id from branch_id",
         }
 
-    # Load or create a KeyManager for signing.
-    # In production, the signing key should be loaded from a secure location.
-    km = KeyManager()
+    # Load the signing key from EP_SIGNING_KEY_FILE (production path).
+    # Falls back to generating a new key only in dev mode with no file configured.
+    key_file = os.environ.get("EP_SIGNING_KEY_FILE", "")
+    if key_file and os.path.isfile(key_file):
+        km = KeyManager()
+        km.load_private_key(key_file)
+    else:
+        # Dev fallback: generate an ephemeral key (tokens won't verify
+        # against a proxy that has a different public key).
+        km = KeyManager()
 
     auth_engine = AuthorizationEngine(conn.engine, km, ep_id)
     payload_hash = "sha256:" + canonical_hash(args["arguments"])
