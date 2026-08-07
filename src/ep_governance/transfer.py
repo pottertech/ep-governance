@@ -480,11 +480,15 @@ class TransferImporter:
                     "resources": policy.get("resources", []),
                     "conditions": policy.get("conditions", {}),
                     "priority": policy.get("priority", 0),
-                    "scope": policy.get("scope", "global"),
-                    "agent_scope": policy.get("agent_scope"),
+                    # Null out agent_scope and use global scope to avoid FK
+                    # violations on PostgreSQL -- the referenced principals may
+                    # not exist in the target schema. The import_mappings table
+                    # preserves the provenance of the original IDs.
+                    "scope": "global" if policy.get("scope") == "agent" else policy.get("scope", "global"),
+                    "agent_scope": None,
                     "description": policy.get("description", "Imported policy"),
                     "status": policy_status,
-                    "created_by": package.signer_id,
+                    "created_by": ep_service_principal_id,
                     "approved_by": None,
                     "approved_at": None,
                     "activation_version": None,
@@ -497,6 +501,35 @@ class TransferImporter:
         self.conn.commit()
 
         # Store import provenance mappings
+        # Create a transfer package record in the target schema for FK integrity
+        import_package_id = str(XID.new())
+        self.conn.execute(
+            sa.text(
+                "INSERT INTO ep_transfer_packages "
+                "(id, lattice_id, schema_version, package_version, "
+                " source_lattice_id, project_id, snapshot_sequence, "
+                " content_hash, signature, signer_id, trust_status, "
+                " lattice_state, model_info, created_at) "
+                "VALUES (:id, :lid, :sv, :pv, :slid, :pid, 0, "
+                "        :ch, :sig, :sid, :ts, :ls, NULL, :now)"
+            ),
+            {
+                "id": import_package_id,
+                "lid": lattice["id"],
+                "sv": package.schema_version,
+                "pv": package.package_version,
+                "slid": package.source_lattice_id,
+                "pid": project["id"],
+                "ch": package.content_hash,
+                "sig": package.signature or "",
+                "sid": package.signer_id or "",
+                "ts": "trusted" if trusted_signer else "untrusted",
+                "ls": json.dumps(package.lattice_state, default=str),
+                "now": _now_iso(),
+            },
+        )
+        self.conn.commit()
+
         for old_id, new_id in self._id_mappings.items():
             self.conn.execute(
                 sa.text(
@@ -510,7 +543,7 @@ class TransferImporter:
                     "old": old_id,
                     "new": new_id,
                     "slid": package.source_lattice_id,
-                    "spid": package.source_lattice_id,  # no FK enforced in SQLite for this
+                    "spid": import_package_id,  # FK to ep_transfer_packages in target schema
                     "etype": "entity",
                     "now": _now_iso(),
                 },
